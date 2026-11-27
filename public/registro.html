@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0f6b5c">
+<title>Registro de jornada</title>
+<link rel="stylesheet" href="/static/estilos.css">
+<style>
+  main { max-width: 440px; margin: 0 auto; padding: 1rem; }
+  header { padding: .6rem 0 1rem; }
+  .grande { width: 100%; padding: 1.1rem; font-size: 1.25rem; border-radius: 12px; }
+  .grande.ENTRADA { background: var(--entrada); } .grande.SALIDA { background: var(--salida); }
+  .grande.sugerencia { box-shadow: 0 0 0 4px #0f6b5c33; }
+  .grande.otro { background: #fff; color: var(--texto); border: 1px solid var(--borde); font-size: 1rem; padding: .8rem; }
+  .comprobante { text-align: center; }
+  .comprobante .tipo { font-size: 1.6rem; font-weight: 800; }
+  .comprobante .hora { font-size: 2.6rem; font-weight: 800; font-variant-numeric: tabular-nums; }
+  .check { width: 64px; height: 64px; border-radius: 50%; background: var(--ok-bg); color: var(--primario);
+    display: grid; place-items: center; font-size: 2rem; margin: 0 auto .5rem; }
+  footer { margin-top: 1.5rem; text-align: center; }
+  footer button { background: none; border: none; color: var(--suave); text-decoration: underline; font-weight: 400; padding: .3rem; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <div class="muted" id="empresa">Registro de jornada</div>
+    <h1 id="titulo">Registro de jornada</h1>
+  </header>
+
+  <div id="mensaje" class="msg oculto" role="alert"></div>
+
+  <!-- Vincular celular -->
+  <section id="vVincular" class="panel pila oculto">
+    <h2>Identifícate</h2>
+    <p class="muted">Solo la primera vez. Tu celular quedará vinculado a tu número de empleado.</p>
+    <form id="fVincular" class="pila">
+      <div><label for="numero">Número de empleado</label><input id="numero" inputmode="numeric" autocomplete="username" required></div>
+      <div><label for="pin">NIP</label><input id="pin" type="password" inputmode="numeric" autocomplete="current-password" required></div>
+      <button class="grande">Continuar</button>
+    </form>
+  </section>
+
+  <!-- Elegir entrada / salida -->
+  <section id="vRegistrar" class="pila oculto">
+    <div class="panel">
+      <div class="muted">Hola,</div>
+      <h2 id="nombre"></h2>
+      <div class="muted" id="ultimo"></div>
+    </div>
+    <button id="bSugerido" class="grande sugerencia"></button>
+    <button id="bOtro" class="grande otro"></button>
+    <p class="muted" id="ubicacionInfo">La hora que cuenta es la del servidor de la empresa, no la de tu celular.</p>
+  </section>
+
+  <!-- Comprobante -->
+  <section id="vListo" class="panel comprobante pila oculto">
+    <div class="check" aria-hidden="true">✓</div>
+    <div class="tipo" id="cTipo"></div>
+    <div class="hora" id="cHora"></div>
+    <div id="cFecha"></div>
+    <div class="muted" id="cFolio"></div>
+    <p class="muted">Puedes cerrar esta pantalla.</p>
+  </section>
+
+  <!-- Historial -->
+  <section id="vHistorial" class="panel pila oculto">
+    <h2>Mis registros (últimos 31 días)</h2>
+    <div class="tabla-wrap"><table><thead><tr><th>Fecha</th><th>Entrada</th><th>Salida</th><th class="num">Horas</th></tr></thead>
+      <tbody id="tHist"></tbody></table></div>
+    <button class="sec" onclick="mostrarInicio()">Volver</button>
+  </section>
+
+  <section id="vSinQr" class="panel pila oculto">
+    <h2>Escanea el código QR</h2>
+    <p>Para registrar tu entrada o salida, escanea con la cámara de tu celular el código QR de la pantalla en tu centro de trabajo.</p>
+  </section>
+
+  <footer id="pie" class="oculto">
+    <button onclick="verHistorial()">Ver mis registros</button> ·
+    <button onclick="desvincular()">Desvincular este celular</button>
+  </footer>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+const vistas = ['vVincular', 'vRegistrar', 'vListo', 'vHistorial', 'vSinQr'];
+const t = new URLSearchParams(location.search).get('t');
+let pase = null, yo = null, ubic = null;
+
+function ver(id) { vistas.forEach((v) => $(v).classList.toggle('oculto', v !== id)); }
+function msg(texto, tipo = 'err') { const m = $('mensaje'); m.textContent = texto; m.className = 'msg ' + tipo; if (!texto) m.classList.add('oculto'); }
+async function api(url, body) {
+  const r = await fetch(url, body ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) } : {});
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(d.error || 'Error de conexión');
+  return d;
+}
+
+async function iniciar() {
+  // Se quita el token de la barra de direcciones para que no se reutilice al recargar o compartir
+  if (t) history.replaceState(null, '', '/r');
+  try {
+    if (t) { const e = await api('/api/escaneo', { t }); pase = e.pase; $('titulo').textContent = e.kiosco; }
+  } catch (e) { msg(e.message); }
+  await mostrarInicio();
+  if (pase && navigator.geolocation) {
+    navigator.geolocation.getCurrentPosition((p) => { ubic = p.coords; }, () => {}, { enableHighAccuracy: true, timeout: 8000, maximumAge: 60000 });
+  }
+}
+
+async function mostrarInicio() {
+  yo = await api('/api/yo');
+  $('empresa').textContent = yo.empresa;
+  $('pie').classList.toggle('oculto', !yo.vinculado);
+  if (!yo.vinculado) return ver(pase ? 'vVincular' : 'vSinQr');
+  if (!pase) return ver('vSinQr');
+  $('nombre').textContent = yo.empleado.nombre;
+  $('ultimo').textContent = yo.ultimo ? `Último registro: ${yo.ultimo.tipo.toLowerCase()} el ${yo.ultimo.fecha} a las ${yo.ultimo.hora}` : 'Aún no tienes registros.';
+  const otro = yo.sugerido === 'ENTRADA' ? 'SALIDA' : 'ENTRADA';
+  $('bSugerido').textContent = 'Registrar ' + yo.sugerido.toLowerCase();
+  $('bSugerido').className = 'grande sugerencia ' + yo.sugerido;
+  $('bSugerido').onclick = () => registrar(yo.sugerido);
+  $('bOtro').textContent = 'No, registrar ' + otro.toLowerCase();
+  $('bOtro').onclick = () => registrar(otro);
+  ver('vRegistrar');
+}
+
+$('fVincular').onsubmit = async (ev) => {
+  ev.preventDefault(); msg('');
+  try { await api('/api/vincular', { numero: $('numero').value, pin: $('pin').value }); $('pin').value = ''; await mostrarInicio(); }
+  catch (e) { msg(e.message); }
+};
+
+async function registrar(tipo) {
+  msg('');
+  [$('bSugerido'), $('bOtro')].forEach((b) => (b.disabled = true));
+  try {
+    const d = await api('/api/registrar', { pase, tipo, lat: ubic?.latitude, lon: ubic?.longitude, precision: ubic?.accuracy });
+    pase = null;
+    $('cTipo').textContent = d.tipo === 'ENTRADA' ? 'Entrada registrada' : 'Salida registrada';
+    $('cTipo').style.color = d.tipo === 'ENTRADA' ? 'var(--entrada)' : 'var(--salida)';
+    $('cHora').textContent = d.hora;
+    $('cFecha').textContent = d.nombre + ' · ' + new Date(d.fecha + 'T12:00').toLocaleDateString('es-MX', { weekday: 'long', day: 'numeric', month: 'long' });
+    $('cFolio').textContent = `Folio ${d.folio} · Sello ${d.sello}`;
+    ver('vListo');
+    navigator.vibrate?.(120);
+  } catch (e) { msg(e.message); }
+  finally { [$('bSugerido'), $('bOtro')].forEach((b) => (b.disabled = false)); }
+}
+
+async function verHistorial() {
+  msg('');
+  try {
+    const d = await api('/api/mis-registros');
+    $('tHist').innerHTML = d.jornadas.length ? '' : '<tr><td colspan="4" class="muted">Sin registros</td></tr>';
+    for (const j of d.jornadas) {
+      const tr = document.createElement('tr');
+      [j.fecha, j.entrada || '—', j.salida ? j.salida + (j.salida_fecha !== j.fecha ? ' (+1)' : '') : '—', j.horas ?? '—']
+        .forEach((v, i) => { const td = document.createElement('td'); td.textContent = v; if (i === 3) td.className = 'num'; tr.append(td); });
+      tr.title = j.observaciones;
+      $('tHist').append(tr);
+    }
+    ver('vHistorial');
+  } catch (e) { msg(e.message); }
+}
+
+async function desvincular() {
+  if (!confirm('¿Desvincular este celular? Tendrás que volver a ingresar tu número y NIP.')) return;
+  await api('/api/desvincular', {});
+  msg('Celular desvinculado.', 'ok');
+  await mostrarInicio();
+}
+
+iniciar();
+</script>
+</body>
+</html>

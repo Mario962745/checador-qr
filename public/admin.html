@@ -1,0 +1,360 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Administración · Registro de jornada</title>
+<link rel="stylesheet" href="/static/estilos.css">
+<style>
+  .barra-sup { background: #0d1b1e; color: #fff; padding: .8rem 1.2rem; display: flex; align-items: center; gap: 1rem; flex-wrap: wrap; }
+  .barra-sup .marca { font-weight: 700; } .barra-sup .muted { color: #b9c4c9; }
+  .barra-sup .der { margin-left: auto; display: flex; gap: .6rem; align-items: center; }
+  nav.tabs { display: flex; gap: .2rem; padding: 0 1.2rem; background: #fff; border-bottom: 1px solid var(--borde); overflow-x: auto; }
+  nav.tabs button { background: none; color: var(--suave); border: none; border-bottom: 3px solid transparent; border-radius: 0; padding: .8rem .9rem; white-space: nowrap; }
+  nav.tabs button[aria-selected="true"] { color: var(--texto); border-bottom-color: var(--primario); }
+  main { padding: 1.2rem; max-width: 1200px; margin: 0 auto; }
+  .login { max-width: 360px; margin: 10vh auto; }
+  .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: .8rem; }
+  .kpi .v { font-size: 1.8rem; font-weight: 800; font-variant-numeric: tabular-nums; }
+  dialog { border: 1px solid var(--borde); border-radius: var(--radio); padding: 1.2rem; max-width: 480px; width: 92vw; }
+  dialog::backdrop { background: #0006; }
+  .acciones { display: flex; gap: .5rem; justify-content: flex-end; margin-top: 1rem; }
+  td .sec { padding: .25rem .55rem; font-size: .82rem; }
+  code { font-size: .8rem; word-break: break-all; }
+</style>
+</head>
+<body>
+
+<section id="vLogin" class="login panel pila oculto">
+  <h1>Registro de jornada</h1>
+  <p class="muted">Acceso de administración</p>
+  <div id="mLogin" class="msg err oculto"></div>
+  <form id="fLogin" class="pila">
+    <div><label for="lUsuario">Usuario</label><input id="lUsuario" autocomplete="username" required></div>
+    <div><label for="lPass">Contraseña</label><input id="lPass" type="password" autocomplete="current-password" required></div>
+    <button>Entrar</button>
+  </form>
+</section>
+
+<div id="vApp" class="oculto">
+  <div class="barra-sup">
+    <span class="marca">Registro de jornada</span><span class="muted" id="empresa"></span>
+    <span class="der"><span class="muted" id="quien"></span><button class="sec" onclick="salir()">Salir</button></span>
+  </div>
+  <nav class="tabs" role="tablist">
+    <button data-tab="hoy" aria-selected="true">Hoy</button>
+    <button data-tab="jornadas">Jornadas</button>
+    <button data-tab="registros">Registros</button>
+    <button data-tab="empleados">Empleados</button>
+    <button data-tab="kioscos">Kioscos (QR)</button>
+    <button data-tab="integridad">Integridad y bitácora</button>
+    <button data-tab="cuenta">Cuenta</button>
+  </nav>
+  <main>
+    <div id="mApp" class="msg oculto" role="status"></div>
+
+    <!-- HOY -->
+    <section data-panel="hoy" class="pila">
+      <div class="kpis">
+        <div class="panel kpi"><div class="muted">Dentro ahora</div><div class="v" id="kDentro">–</div></div>
+        <div class="panel kpi"><div class="muted">Ya salieron hoy</div><div class="v" id="kSalio">–</div></div>
+        <div class="panel kpi"><div class="muted">Sin registro hoy</div><div class="v" id="kSin">–</div></div>
+      </div>
+      <div class="panel pila">
+        <div class="fila"><h2 style="flex:1">Estado del personal</h2><button class="sec" onclick="cargarHoy()">Actualizar</button></div>
+        <div class="tabla-wrap"><table><thead><tr><th>No.</th><th>Nombre</th><th>Puesto</th><th>Estado</th><th>Último registro</th></tr></thead><tbody id="tHoy"></tbody></table></div>
+      </div>
+    </section>
+
+    <!-- JORNADAS -->
+    <section data-panel="jornadas" class="pila oculto">
+      <div class="panel fila">
+        <div><label>Desde</label><input type="date" id="jDesde"></div>
+        <div><label>Hasta</label><input type="date" id="jHasta"></div>
+        <div><label>Empleado</label><select id="jEmp" class="selEmp"></select></div>
+        <button onclick="cargarJornadas()">Consultar</button>
+        <button class="sec" onclick="exportar('jornadas')">Exportar CSV</button>
+      </div>
+      <div class="panel pila">
+        <h2>Resumen por persona</h2>
+        <div class="tabla-wrap"><table><thead><tr><th>No.</th><th>Nombre</th><th class="num">Días</th><th class="num">Horas totales</th><th class="num">Incidencias</th></tr></thead><tbody id="tResumen"></tbody></table></div>
+      </div>
+      <div class="panel pila">
+        <h2>Detalle de jornadas</h2>
+        <div class="tabla-wrap"><table><thead><tr><th>Fecha</th><th>No.</th><th>Nombre</th><th>Entrada</th><th>Salida</th><th class="num">Horas</th><th>Observaciones</th></tr></thead><tbody id="tJornadas"></tbody></table></div>
+      </div>
+    </section>
+
+    <!-- REGISTROS -->
+    <section data-panel="registros" class="pila oculto">
+      <div class="panel fila">
+        <div><label>Desde</label><input type="date" id="rDesde"></div>
+        <div><label>Hasta</label><input type="date" id="rHasta"></div>
+        <div><label>Empleado</label><select id="rEmp" class="selEmp"></select></div>
+        <button onclick="cargarRegistros()">Consultar</button>
+        <button class="sec" onclick="exportar('registros')">Exportar CSV</button>
+        <button class="sec" onclick="abrirCorreccion()">Agregar registro faltante</button>
+      </div>
+      <p class="muted">Los registros no se pueden editar ni borrar. Para corregir, se agrega un registro faltante o se anula uno erróneo; ambos quedan con motivo y con el nombre de quien lo hizo.</p>
+      <div class="panel"><div class="tabla-wrap"><table><thead><tr><th>Folio</th><th>Fecha</th><th>Hora</th><th>Nombre</th><th>Tipo</th><th>Origen</th><th>Registró</th><th>Kiosco / motivo</th><th></th></tr></thead><tbody id="tRegistros"></tbody></table></div></div>
+    </section>
+
+    <!-- EMPLEADOS -->
+    <section data-panel="empleados" class="pila oculto">
+      <div class="panel pila">
+        <h2>Alta de persona trabajadora</h2>
+        <form id="fEmp" class="fila">
+          <div><label>No. empleado *</label><input name="numero" required></div>
+          <div style="flex-basis:240px"><label>Nombre completo *</label><input name="nombre" required></div>
+          <div><label>Puesto</label><input name="puesto"></div>
+          <div><label>RFC</label><input name="rfc" maxlength="13"></div>
+          <div><label>CURP</label><input name="curp" maxlength="18"></div>
+          <div><label>NIP inicial * (4–8 dígitos)</label><input name="pin" inputmode="numeric" pattern="\d{4,8}" required></div>
+          <button>Dar de alta</button>
+        </form>
+      </div>
+      <div class="panel"><div class="tabla-wrap"><table><thead><tr><th>No.</th><th>Nombre</th><th>Puesto</th><th>RFC</th><th>Celular</th><th>Estado</th><th></th></tr></thead><tbody id="tEmp"></tbody></table></div></div>
+    </section>
+
+    <!-- KIOSCOS -->
+    <section data-panel="kioscos" class="pila oculto">
+      <div class="panel pila">
+        <h2>Pantallas de registro (QR)</h2>
+        <p class="muted">Abre el enlace del kiosco en una tableta, monitor o computadora a la entrada del centro de trabajo. El código QR cambia cada 30 segundos, así nadie puede registrarse con una foto del código desde otro lugar.</p>
+        <form id="fKiosco" class="fila"><div><label>Nombre del lugar</label><input name="nombre" placeholder="Entrada principal" required></div><button>Crear kiosco</button></form>
+      </div>
+      <div class="panel"><div class="tabla-wrap"><table><thead><tr><th>Nombre</th><th>Enlace del kiosco</th><th>Estado</th><th></th></tr></thead><tbody id="tKioscos"></tbody></table></div></div>
+    </section>
+
+    <!-- INTEGRIDAD -->
+    <section data-panel="integridad" class="pila oculto">
+      <div class="panel pila">
+        <h2>Verificación de integridad</h2>
+        <p class="muted">Cada registro lleva un sello SHA-256 encadenado con el anterior. Si alguien alterara la base de datos, la verificación lo detecta. Recomendación: guarde periódicamente el “último sello” (por ejemplo, en un correo a sí mismo) como evidencia externa.</p>
+        <button onclick="verificar()">Verificar ahora</button>
+        <div id="resIntegridad"></div>
+      </div>
+      <div class="panel pila">
+        <h2>Bitácora de acciones (últimas 300)</h2>
+        <div class="tabla-wrap"><table><thead><tr><th>Fecha</th><th>Quién</th><th>Acción</th><th>Detalle</th></tr></thead><tbody id="tBit"></tbody></table></div>
+      </div>
+    </section>
+
+    <!-- CUENTA -->
+    <section data-panel="cuenta" class="pila oculto">
+      <div class="panel pila" style="max-width:480px">
+        <h2>Cambiar mi contraseña</h2>
+        <form id="fPass" class="pila">
+          <div><label>Contraseña actual</label><input type="password" name="actual" required></div>
+          <div><label>Nueva contraseña (mín. 8)</label><input type="password" name="nueva" minlength="8" required></div>
+          <button>Guardar</button>
+        </form>
+      </div>
+      <div class="panel pila" style="max-width:480px">
+        <h2>Otros administradores</h2>
+        <ul id="lAdmins"></ul>
+        <form id="fAdmin" class="pila">
+          <div><label>Usuario</label><input name="usuario" required></div>
+          <div><label>Nombre</label><input name="nombre" required></div>
+          <div><label>Contraseña (mín. 8)</label><input type="password" name="password" minlength="8" required></div>
+          <button>Agregar administrador</button>
+        </form>
+      </div>
+    </section>
+  </main>
+</div>
+
+<!-- Diálogo: corrección -->
+<dialog id="dCorr">
+  <form id="fCorr" class="pila" method="dialog">
+    <h2 id="dCorrTitulo">Agregar registro faltante</h2>
+    <div id="dCorrNuevo" class="pila">
+      <div><label>Empleado</label><select name="empleado_id" class="selEmp" required></select></div>
+      <div><label>Tipo</label><select name="tipo"><option>ENTRADA</option><option>SALIDA</option></select></div>
+      <div><label>Fecha y hora (hora local)</label><input type="datetime-local" name="fecha_hora"></div>
+    </div>
+    <p id="dCorrAnular" class="msg warn oculto"></p>
+    <div><label>Motivo (obligatorio)</label><textarea name="motivo" rows="3" required placeholder="Ej. Olvidó registrar salida; confirmado por su supervisor"></textarea></div>
+    <div class="acciones"><button type="button" class="sec" onclick="dCorr.close()">Cancelar</button><button id="bCorr" type="submit">Guardar</button></div>
+  </form>
+</dialog>
+
+<!-- Diálogo: editar empleado -->
+<dialog id="dEmp">
+  <form id="fEditEmp" class="pila" method="dialog">
+    <h2>Editar persona trabajadora</h2>
+    <input type="hidden" name="id">
+    <div><label>Nombre</label><input name="nombre" required></div>
+    <div><label>Puesto</label><input name="puesto"></div>
+    <div class="fila"><div><label>RFC</label><input name="rfc"></div><div><label>CURP</label><input name="curp"></div></div>
+    <div><label>Nuevo NIP (dejar vacío para no cambiar)</label><input name="pin" inputmode="numeric" pattern="\d{4,8}"></div>
+    <label style="display:flex;gap:.5rem;align-items:center"><input type="checkbox" name="revocar_celular" style="width:auto"> Desvincular su celular actual</label>
+    <label style="display:flex;gap:.5rem;align-items:center"><input type="checkbox" name="activo" style="width:auto"> Activo (desmarcar para dar de baja)</label>
+    <div class="acciones"><button type="button" class="sec" onclick="dEmp.close()">Cancelar</button><button type="submit">Guardar</button></div>
+  </form>
+</dialog>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+let empleados = [], hoy = '', ultimosRegistros = [];
+
+async function api(url, body) {
+  const r = await fetch(url, body ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) } : {});
+  const d = await r.json().catch(() => ({}));
+  if (r.status === 401 && !url.endsWith('/login')) { mostrarLogin(); throw new Error(d.error); }
+  if (!r.ok) throw new Error(d.error || 'Error');
+  return d;
+}
+function aviso(t, tipo = 'ok') { const m = $('mApp'); m.textContent = t; m.className = 'msg ' + tipo; clearTimeout(m._t); m._t = setTimeout(() => m.classList.add('oculto'), 6000); }
+const conAviso = (fn) => async (...a) => { try { await fn(...a); } catch (e) { aviso(e.message, 'err'); } };
+const datos = (form) => Object.fromEntries(new FormData(form));
+
+function mostrarLogin() { $('vLogin').classList.remove('oculto'); $('vApp').classList.add('oculto'); }
+$('fLogin').onsubmit = async (e) => {
+  e.preventDefault();
+  try { await api('/api/admin/login', { usuario: $('lUsuario').value, password: $('lPass').value }); $('lPass').value = ''; iniciar(); }
+  catch (er) { $('mLogin').textContent = er.message; $('mLogin').classList.remove('oculto'); }
+};
+async function salir() { await api('/api/admin/logout', {}); mostrarLogin(); }
+
+async function iniciar() {
+  let yo; try { yo = await api('/api/admin/yo'); } catch { return mostrarLogin(); }
+  $('vLogin').classList.add('oculto'); $('vApp').classList.remove('oculto');
+  $('empresa').textContent = yo.empresa; $('quien').textContent = yo.nombre + ' (' + yo.usuario + ')';
+  hoy = yo.hoy;
+  const lunes = new Date(hoy + 'T12:00'); lunes.setDate(lunes.getDate() - ((lunes.getDay() + 6) % 7));
+  $('jDesde').value = lunes.toISOString().slice(0, 10); $('jHasta').value = hoy;
+  $('rDesde').value = hoy; $('rHasta').value = hoy;
+  await cargarEmpleados();
+  cargarHoy();
+}
+
+// Pestañas
+document.querySelectorAll('nav.tabs button').forEach((b) => b.onclick = () => {
+  document.querySelectorAll('nav.tabs button').forEach((x) => x.setAttribute('aria-selected', x === b));
+  document.querySelectorAll('[data-panel]').forEach((p) => p.classList.toggle('oculto', p.dataset.panel !== b.dataset.tab));
+  ({ hoy: cargarHoy, jornadas: cargarJornadas, registros: cargarRegistros, empleados: cargarEmpleados, kioscos: cargarKioscos, integridad: cargarBitacora, cuenta: cargarAdmins })[b.dataset.tab]?.();
+});
+
+const cargarHoy = conAviso(async () => {
+  const d = await api('/api/admin/presentes');
+  const c = { DENTRO: 0, 'SALIÓ': 0, 'SIN REGISTRO HOY': 0 }; d.forEach((x) => c[x.estado]++);
+  $('kDentro').textContent = c.DENTRO; $('kSalio').textContent = c['SALIÓ']; $('kSin').textContent = c['SIN REGISTRO HOY'];
+  $('tHoy').innerHTML = d.map((x) => `<tr><td>${esc(x.numero)}</td><td>${esc(x.nombre)}</td><td>${esc(x.puesto)}</td>
+    <td><span class="chip ${x.estado === 'DENTRO' ? 'DENTRO' : ''}">${esc(x.estado)}</span></td>
+    <td>${x.ultimo ? esc(`${x.ultimo.tipo.toLowerCase()} · ${x.ultimo.fecha} ${x.ultimo.hora}`) : '—'}</td></tr>`).join('') || '<tr><td colspan="5" class="muted">Aún no hay personas dadas de alta.</td></tr>';
+});
+
+const qs = (p) => `desde=${$(p + 'Desde').value}&hasta=${$(p + 'Hasta').value}&empleado_id=${$(p + 'Emp').value}`;
+function exportar(tipo) { location.href = `/api/admin/export/${tipo}.csv?` + qs(tipo === 'jornadas' ? 'j' : 'r'); }
+
+const cargarJornadas = conAviso(async () => {
+  const d = await api('/api/admin/jornadas?' + qs('j'));
+  $('tJornadas').innerHTML = d.map((j) => `<tr><td>${j.fecha}</td><td>${esc(j.numero)}</td><td>${esc(j.nombre)}</td>
+    <td>${j.entrada || '—'}</td><td>${j.salida ? j.salida + (j.salida_fecha !== j.fecha ? ' <span class="muted">(' + j.salida_fecha + ')</span>' : '') : '—'}</td>
+    <td class="num">${j.horas ?? '—'}</td><td>${j.observaciones ? '<span class="chip">' + esc(j.observaciones) + '</span>' : ''}</td></tr>`).join('')
+    || '<tr><td colspan="7" class="muted">Sin jornadas en el periodo.</td></tr>';
+  const res = {};
+  for (const j of d) {
+    const r = res[j.empleado_id] ??= { numero: j.numero, nombre: j.nombre, dias: new Set(), horas: 0, inc: 0 };
+    r.dias.add(j.fecha); r.horas += j.horas || 0; if (j.observaciones) r.inc++;
+  }
+  $('tResumen').innerHTML = Object.values(res).map((r) => `<tr><td>${esc(r.numero)}</td><td>${esc(r.nombre)}</td>
+    <td class="num">${r.dias.size}</td><td class="num">${r.horas.toFixed(2)}</td><td class="num">${r.inc || ''}</td></tr>`).join('')
+    || '<tr><td colspan="5" class="muted">—</td></tr>';
+});
+
+const cargarRegistros = conAviso(async () => {
+  const d = ultimosRegistros = await api('/api/admin/registros?' + qs('r'));
+  $('tRegistros').innerHTML = d.map((r) => `<tr style="${r.anulado_por ? 'opacity:.55;text-decoration:line-through' : ''}">
+    <td>${r.id}</td><td>${r.fecha}</td><td>${r.hora}</td><td>${esc(r.nombre)}</td>
+    <td><span class="chip ${r.tipo}">${r.tipo}</span>${r.ref_id ? ' folio ' + r.ref_id : ''}${r.anulado_por ? ' <span class="chip anulado">anulado</span>' : ''}</td>
+    <td>${r.origen === 'QR' ? 'QR' : 'Corrección'}</td><td>${esc(r.registrado_por)}</td>
+    <td>${esc(r.motivo || r.kiosco || '')}${r.lat ? ` <a target="_blank" rel="noopener" href="https://maps.google.com/?q=${r.lat},${r.lon}">mapa</a>` : ''}</td>
+    <td>${r.tipo !== 'ANULACION' && !r.anulado_por ? `<button class="sec" onclick="abrirAnulacion(${r.id})">Anular</button>` : ''}</td></tr>`).join('')
+    || '<tr><td colspan="9" class="muted">Sin registros en el periodo.</td></tr>';
+});
+
+let anularId = null;
+function abrirCorreccion() {
+  anularId = null; $('fCorr').reset();
+  $('dCorrTitulo').textContent = 'Agregar registro faltante';
+  $('dCorrNuevo').classList.remove('oculto'); $('dCorrAnular').classList.add('oculto');
+  $('fCorr').fecha_hora.value = hoy + 'T09:00'; $('dCorr').showModal();
+}
+function abrirAnulacion(id) {
+  const reg = ultimosRegistros.find((x) => x.id === id), nombre = reg.nombre, tipo = reg.tipo, cuando = reg.fecha + ' ' + reg.hora;
+  anularId = id; $('fCorr').reset();
+  $('dCorrTitulo').textContent = 'Anular registro';
+  $('dCorrNuevo').classList.add('oculto'); $('dCorrAnular').classList.remove('oculto');
+  $('dCorrAnular').textContent = `Se anulará el folio ${id}: ${tipo} de ${nombre} (${cuando}). El registro original se conserva.`;
+  $('dCorr').showModal();
+}
+$('fCorr').onsubmit = conAviso(async (e) => {
+  e.preventDefault();
+  const f = datos(e.target);
+  const body = anularId ? { anular_id: anularId, motivo: f.motivo } : f;
+  const r = await api('/api/admin/correccion', body);
+  $('dCorr').close(); aviso(`Corrección guardada (folio ${r.folio}).`); cargarRegistros();
+});
+
+const cargarEmpleados = conAviso(async () => {
+  empleados = await api('/api/admin/empleados');
+  document.querySelectorAll('.selEmp').forEach((s) => {
+    const todos = s.id === 'jEmp' || s.id === 'rEmp';
+    s.innerHTML = (todos ? '<option value="">Todos</option>' : '') + empleados.filter((e) => e.activo || todos)
+      .map((e) => `<option value="${e.id}">${esc(e.numero)} · ${esc(e.nombre)}</option>`).join('');
+  });
+  $('tEmp').innerHTML = empleados.map((e) => `<tr><td>${esc(e.numero)}</td><td>${esc(e.nombre)}</td><td>${esc(e.puesto)}</td><td>${esc(e.rfc)}</td>
+    <td>${e.celular ? 'Vinculado' : '<span class="muted">Sin vincular</span>'}</td>
+    <td>${e.activo ? '<span class="chip DENTRO">Activo</span>' : '<span class="chip">Baja</span>'}</td>
+    <td><button class="sec" onclick="editarEmp(${e.id})">Editar</button></td></tr>`).join('')
+    || '<tr><td colspan="7" class="muted">Aún no hay personas dadas de alta.</td></tr>';
+});
+$('fEmp').onsubmit = conAviso(async (e) => {
+  e.preventDefault(); await api('/api/admin/empleados', datos(e.target)); e.target.reset(); aviso('Persona dada de alta. Entréguele su número y NIP.'); cargarEmpleados();
+});
+function editarEmp(id) {
+  const e = empleados.find((x) => x.id === id), f = $('fEditEmp'); f.reset();
+  f.id.value = e.id; f.nombre.value = e.nombre; f.puesto.value = e.puesto || ''; f.rfc.value = e.rfc || ''; f.curp.value = e.curp || '';
+  f.activo.checked = !!e.activo; $('dEmp').showModal();
+}
+$('fEditEmp').onsubmit = conAviso(async (e) => {
+  e.preventDefault(); const f = e.target;
+  await api('/api/admin/empleados/editar', { id: Number(f.id.value), nombre: f.nombre.value, puesto: f.puesto.value, rfc: f.rfc.value, curp: f.curp.value,
+    pin: f.pin.value, revocar_celular: f.revocar_celular.checked, activo: f.activo.checked });
+  $('dEmp').close(); aviso('Cambios guardados.'); cargarEmpleados();
+});
+
+const cargarKioscos = conAviso(async () => {
+  const d = await api('/api/admin/kioscos');
+  $('tKioscos').innerHTML = d.map((k) => { const url = `${location.origin}/kiosco?k=${k.clave}`; return `<tr><td>${esc(k.nombre)}</td>
+    <td><a href="${url}" target="_blank" rel="noopener">${esc(url)}</a></td><td>${k.activo ? 'Activo' : 'Inactivo'}</td>
+    <td><button class="sec" onclick="estadoKiosco(${k.id}, ${!k.activo})">${k.activo ? 'Desactivar' : 'Activar'}</button></td></tr>`; }).join('')
+    || '<tr><td colspan="4" class="muted">Crea el primer kiosco para empezar.</td></tr>';
+});
+$('fKiosco').onsubmit = conAviso(async (e) => { e.preventDefault(); await api('/api/admin/kioscos', datos(e.target)); e.target.reset(); cargarKioscos(); });
+const estadoKiosco = conAviso(async (id, activo) => { await api('/api/admin/kioscos/estado', { id, activo }); cargarKioscos(); });
+
+const verificar = conAviso(async () => {
+  const r = await api('/api/admin/integridad');
+  $('resIntegridad').innerHTML = r.ok
+    ? `<div class="msg ok">✓ Cadena íntegra: ${r.total} registros verificados.<br>Último sello: <code>${r.ultimo_hash}</code></div>`
+    : `<div class="msg err">✗ La cadena está rota en el folio ${r.fallo_en}. La base de datos fue alterada fuera del sistema.</div>`;
+});
+const cargarBitacora = conAviso(async () => {
+  const d = await api('/api/admin/bitacora');
+  $('tBit').innerHTML = d.map((b) => `<tr><td>${b.fecha_local}</td><td>${esc(b.actor)}</td><td>${esc(b.accion)}</td><td><code>${esc(b.detalle || '')}</code></td></tr>`).join('');
+});
+const cargarAdmins = conAviso(async () => {
+  const d = await api('/api/admin/admins');
+  $('lAdmins').innerHTML = d.map((a) => `<li>${esc(a.nombre)} <span class="muted">(${esc(a.usuario)})</span></li>`).join('');
+});
+$('fPass').onsubmit = conAviso(async (e) => { e.preventDefault(); await api('/api/admin/password', datos(e.target)); e.target.reset(); aviso('Contraseña actualizada.'); });
+$('fAdmin').onsubmit = conAviso(async (e) => { e.preventDefault(); await api('/api/admin/admins', datos(e.target)); e.target.reset(); aviso('Administrador agregado.'); cargarAdmins(); });
+
+iniciar();
+</script>
+</body>
+</html>

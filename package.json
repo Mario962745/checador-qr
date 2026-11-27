@@ -1,0 +1,13 @@
+{
+  "name": "checador-qr",
+  "version": "1.0.0",
+  "description": "Registro electrónico de jornada laboral con código QR (LFT art. 132, fr. XXXIV)",
+  "type": "module",
+  "main": "server.js",
+  "engines": { "node": ">=22.13" },
+  "scripts": {
+    "start": "node server.js"
+  },
+  "license": "UNLICENSED",
+  "private": true
+}

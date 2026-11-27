@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kiosco · Registro de jornada</title>
+<link rel="stylesheet" href="/static/estilos.css">
+<script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.js"></script>
+<style>
+  body { min-height: 100vh; display: grid; place-items: center; background: #0d1b1e; color: #fff; }
+  .kiosco { text-align: center; padding: 2rem; max-width: 720px; width: 100%; }
+  .empresa { font-size: 1.1rem; opacity: .75; }
+  .lugar { font-size: 1.6rem; font-weight: 700; margin: .2rem 0 1.2rem; }
+  .qr { background: #fff; border-radius: 18px; padding: 18px; width: min(70vmin, 460px); aspect-ratio: 1; margin: 0 auto; }
+  .qr svg { width: 100%; height: 100%; display: block; }
+  .barra { height: 6px; background: #ffffff22; border-radius: 6px; margin: 1rem auto 0; width: min(70vmin, 460px); overflow: hidden; }
+  .barra > div { height: 100%; background: #3fc1a5; width: 100%; transition: width 1s linear; }
+  .reloj { font-size: 3.2rem; font-weight: 700; font-variant-numeric: tabular-nums; margin-top: 1rem; }
+  .fecha { opacity: .75; }
+  .instr { margin-top: 1.2rem; font-size: 1.15rem; }
+  .error { background: #5a1d1d; padding: 1rem; border-radius: 10px; }
+  #pantalla { position: fixed; right: 1rem; bottom: 1rem; background: #ffffff18; }
+</style>
+</head>
+<body>
+<main class="kiosco">
+  <div class="empresa" id="empresa"></div>
+  <div class="lugar" id="lugar">Cargando…</div>
+  <div class="qr" id="qr" role="img" aria-label="Código QR para registrar entrada o salida"></div>
+  <div class="barra"><div id="barra"></div></div>
+  <div class="reloj" id="reloj">--:--:--</div>
+  <div class="fecha" id="fecha"></div>
+  <p class="instr">Escanea el código con la cámara de tu celular para registrar tu <b>entrada</b> o <b>salida</b>.</p>
+  <p class="error oculto" id="error"></p>
+</main>
+<button id="pantalla" class="sec" onclick="document.documentElement.requestFullscreen?.()">Pantalla completa</button>
+<script>
+const clave = new URLSearchParams(location.search).get('k');
+const $ = (id) => document.getElementById(id);
+let renovarEn = 30, total = 30, desfase = 0;
+
+async function actualizar() {
+  try {
+    const r = await fetch('/api/kiosco/token?k=' + encodeURIComponent(clave || ''));
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error);
+    $('error').classList.add('oculto');
+    $('empresa').textContent = d.empresa;
+    $('lugar').textContent = d.kiosco;
+    $('fecha').textContent = new Date(d.fecha + 'T12:00').toLocaleDateString('es-MX', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+    const url = location.origin + '/r?t=' + encodeURIComponent(d.token);
+    const qr = qrcode(0, 'M'); qr.addData(url); qr.make();
+    $('qr').innerHTML = qr.createSvgTag({ cellSize: 8, margin: 0, scalable: true });
+    renovarEn = d.renovar_en_s; total = 30;
+    // Sincroniza el reloj con la hora del servidor
+    const [h, m, s] = d.hora.split(':').map(Number);
+    const n = new Date(); desfase = (h * 3600 + m * 60 + s) - (n.getHours() * 3600 + n.getMinutes() * 60 + n.getSeconds());
+  } catch (e) {
+    $('error').textContent = 'No se pudo obtener el código: ' + (e.message || 'sin conexión') + '. Reintentando…';
+    $('error').classList.remove('oculto');
+    renovarEn = 5;
+  }
+}
+function tic() {
+  const n = new Date(); let t = (n.getHours() * 3600 + n.getMinutes() * 60 + n.getSeconds() + desfase + 86400) % 86400;
+  $('reloj').textContent = [Math.floor(t / 3600), Math.floor(t / 60) % 60, t % 60].map((x) => String(x).padStart(2, '0')).join(':');
+  renovarEn--;
+  $('barra').style.width = Math.max(0, renovarEn / total * 100) + '%';
+  if (renovarEn <= 0) actualizar();
+}
+if (!clave) { $('lugar').textContent = 'Falta la clave del kiosco'; $('error').textContent = 'Abre esta pantalla desde el panel de administración → Kioscos.'; $('error').classList.remove('oculto'); }
+else { actualizar(); setInterval(tic, 1000); }
+</script>
+</body>
+</html>
