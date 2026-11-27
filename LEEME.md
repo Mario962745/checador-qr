@@ -7,9 +7,22 @@ Aplicación web para llevar el registro electrónico de la jornada que exige el 
 ## Cómo funciona
 
 1. **Kiosco:** en la entrada del centro de trabajo se pone una tableta, monitor o computadora con la pantalla del kiosco. Muestra un **código QR que cambia cada 30 segundos** y la hora oficial del servidor.
-2. **Celular de la persona trabajadora:** escanea el QR con la cámara (no hay que instalar nada). La primera vez ingresa su **número de empleado y NIP**, y el celular queda vinculado. Las siguientes veces solo toca **"Registrar entrada"** o **"Registrar salida"**.
-3. **Comprobante:** en pantalla aparecen la hora registrada, un folio y un sello. Cada persona puede consultar sus registros de los últimos 31 días desde su celular.
-4. **Administración** (`/admin`): personal en tiempo real, jornadas con horas trabajadas, registros, correcciones, altas y bajas, kioscos, verificación de integridad y bitácora. Todo se puede exportar a CSV (se abre en Excel).
+2. **Celular de la persona trabajadora:** escanea el QR con la cámara (no hay que instalar nada). La primera vez ingresa su **número de empleado y NIP**, y el celular queda vinculado. Después, la app le ofrece solo lo que corresponde en ese momento: **entrada**, **inicio de descanso** (comida), **fin de descanso** o **salida**.
+3. **Comprobante:** en pantalla aparecen la hora registrada, un folio y un sello.
+4. **Conformidad semanal:** desde su celular, cada persona revisa sus semanas terminadas y toca **"Estoy de acuerdo"** o escribe una **observación**. La respuesta queda guardada con fecha, sello y celular, y no se puede modificar. Si después se corrige algún registro de esa semana, la conformidad aparece como "cambió después de confirmar" y hay que volver a pedirla.
+5. **Administración** (`/admin`): personal en tiempo real (dentro, en descanso, salió), jornadas con descansos y horas efectivas, **horas extra por semana**, registros, correcciones, altas y bajas, kioscos, verificación de integridad y bitácora. Todo se puede exportar a CSV (se abre en Excel).
+6. **Reporte imprimible:** en "Horas extra y conformidad" se elige una persona y un periodo y se pulsa "Reporte imprimible". Sale una hoja con sus jornadas, descansos, horas extra, el estado de su conformidad y líneas para firmar, que se puede **guardar como PDF** o imprimir.
+
+## Horas extra
+
+- La jornada semanal máxima sigue el calendario de la reforma: **48 h (2026), 46 (2027), 44 (2028), 42 (2029) y 40 (2030 en adelante)**.
+- A cada persona se le puede fijar una jornada pactada menor (campo "Jornada semanal" en Empleados).
+- Horas extra = horas efectivas de la semana (lunes a domingo, sin contar los descansos) − jornada semanal.
+- Las primeras **9 h extra** de la semana se marcan **al doble** y el excedente **al triple** (art. 68 LFT).
+- Ambos valores se pueden cambiar con las variables `JORNADA_SEMANAL` y `HORAS_EXTRA_DOBLES` si la regulación cambia (la reforma prevé aumentar gradualmente el tope de horas extra).
+- **El cálculo es informativo.** No considera jornadas nocturnas o mixtas (máximo diario de 7 y 7.5 h) ni acuerdos particulares: verifíquelo con su contador.
+
+**Sobre los descansos:** la app los descuenta de las horas efectivas. Si la persona no puede salir del centro de trabajo durante su descanso, la ley lo cuenta como tiempo trabajado (art. 64 LFT). En ese caso, no le pida registrar el descanso.
 
 ## Cómo cubre lo que pide la ley
 
@@ -43,6 +56,8 @@ Abra `http://localhost:3000/admin`. Usuario inicial: **admin** / **cambiar123**.
 | `TZ_EMPRESA` | America/Mexico_City | Zona horaria (p. ej. `America/Tijuana`, `America/Cancun`) |
 | `ADMIN_USER` / `ADMIN_PASSWORD` | admin / cambiar123 | Administrador inicial (solo se usa en el primer arranque) |
 | `DB_PATH` | ./datos/checador.db | Ubicación de la base de datos |
+| `JORNADA_SEMANAL` | según el año (48→40) | Fija una jornada semanal máxima distinta al calendario legal |
+| `HORAS_EXTRA_DOBLES` | 9 | Horas extra por semana que se pagan al doble |
 
 ### Puesta en producción
 

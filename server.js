@@ -40,7 +40,7 @@ CREATE TABLE IF NOT EXISTS kioscos (
 CREATE TABLE IF NOT EXISTS registros (
   id INTEGER PRIMARY KEY,
   empleado_id INTEGER NOT NULL REFERENCES empleados(id),
-  tipo TEXT NOT NULL CHECK (tipo IN ('ENTRADA','SALIDA','ANULACION')),
+  tipo TEXT NOT NULL CHECK (tipo IN ('ENTRADA','SALIDA','INICIO_DESCANSO','FIN_DESCANSO','ANULACION')),
   fecha_hora TEXT NOT NULL,            -- UTC ISO-8601, siempre hora del servidor
   origen TEXT NOT NULL CHECK (origen IN ('QR','CORRECCION')),
   registrado_por TEXT NOT NULL,        -- 'empleado:<num>' o 'admin:<usuario>'
@@ -59,7 +59,46 @@ CREATE TRIGGER IF NOT EXISTS reg_no_update BEFORE UPDATE ON registros
   WHEN OLD.hash IS NOT NULL BEGIN SELECT RAISE(ABORT, 'Registro inalterable'); END;
 CREATE TRIGGER IF NOT EXISTS reg_no_delete BEFORE DELETE ON registros
   BEGIN SELECT RAISE(ABORT, 'Registro inalterable'); END;
+-- Conformidad del trabajador con sus registros de una semana (firma electrónica simple)
+CREATE TABLE IF NOT EXISTS conformidades (
+  id INTEGER PRIMARY KEY, empleado_id INTEGER NOT NULL REFERENCES empleados(id),
+  desde TEXT NOT NULL, hasta TEXT NOT NULL,       -- fechas locales YYYY-MM-DD
+  acuerdo INTEGER NOT NULL,                       -- 1 = de acuerdo, 0 = con observación
+  comentario TEXT, resumen TEXT NOT NULL, resumen_hash TEXT NOT NULL,
+  dispositivo_id INTEGER REFERENCES dispositivos(id), ip TEXT, user_agent TEXT,
+  fecha TEXT NOT NULL, hash TEXT NOT NULL);
+CREATE TRIGGER IF NOT EXISTS conf_no_update BEFORE UPDATE ON conformidades
+  BEGIN SELECT RAISE(ABORT, 'Conformidad inalterable'); END;
+CREATE TRIGGER IF NOT EXISTS conf_no_delete BEFORE DELETE ON conformidades
+  BEGIN SELECT RAISE(ABORT, 'Conformidad inalterable'); END;
 `);
+// Migraciones de bases creadas con la versión 1.0
+if (!db.prepare('PRAGMA table_info(empleados)').all().some((c) => c.name === 'horas_semana'))
+  db.exec('ALTER TABLE empleados ADD COLUMN horas_semana REAL');   // jornada semanal pactada (vacío = máximo legal)
+if (!db.prepare("SELECT sql FROM sqlite_master WHERE name='registros'").get().sql.includes('INICIO_DESCANSO')) {
+  // Se reconstruye la tabla para admitir los tipos de descanso, copiando los registros tal cual (mismos sellos).
+  const sqlNueva = db.prepare("SELECT sql FROM sqlite_master WHERE name='registros'").get().sql
+    .replace("'ENTRADA','SALIDA','ANULACION'", "'ENTRADA','SALIDA','INICIO_DESCANSO','FIN_DESCANSO','ANULACION'")
+    .replace(/CREATE TABLE registros/i, 'CREATE TABLE registros_v2');
+  db.exec('PRAGMA foreign_keys = OFF');
+  db.exec(`BEGIN; DROP TRIGGER reg_no_update; DROP TRIGGER reg_no_delete; ${sqlNueva};
+    INSERT INTO registros_v2 SELECT * FROM registros; DROP TABLE registros; ALTER TABLE registros_v2 RENAME TO registros;
+    CREATE INDEX IF NOT EXISTS ix_reg_emp_fecha ON registros(empleado_id, fecha_hora);
+    CREATE TRIGGER reg_no_update BEFORE UPDATE ON registros WHEN OLD.hash IS NOT NULL BEGIN SELECT RAISE(ABORT, 'Registro inalterable'); END;
+    CREATE TRIGGER reg_no_delete BEFORE DELETE ON registros BEGIN SELECT RAISE(ABORT, 'Registro inalterable'); END;
+    COMMIT;`);
+  db.exec('PRAGMA foreign_keys = ON');
+  console.log('Base de datos migrada a la versión 1.1 (descansos).');
+}
+
+// ---------- Jornada legal y horas extra (configurables por si cambia la regulación)
+// Calendario de la reforma publicada el 1-may-2026: 48 h (2026), 46 (2027), 44 (2028), 42 (2029), 40 (2030 en adelante).
+const CALENDARIO_JORNADA = { 2026: 48, 2027: 46, 2028: 44, 2029: 42 };
+const jornadaLegal = (anio) => Number(process.env.JORNADA_SEMANAL) || (anio < 2026 ? 48 : CALENDARIO_JORNADA[anio] ?? 40);
+// Horas extra que se pagan al doble por semana; el excedente se paga al triple (art. 68 LFT).
+const HORAS_EXTRA_DOBLES = Number(process.env.HORAS_EXTRA_DOBLES || 9);
+const TIPOS_MARCA = ['ENTRADA', 'SALIDA', 'INICIO_DESCANSO', 'FIN_DESCANSO'];
+const NOMBRE_TIPO = { ENTRADA: 'Entrada', SALIDA: 'Salida', INICIO_DESCANSO: 'Inicio de descanso', FIN_DESCANSO: 'Fin de descanso', ANULACION: 'Anulación' };
 
 const ahora = () => new Date().toISOString();
 const cfg = (k) => db.prepare('SELECT valor FROM config WHERE clave=?').get(k)?.valor;
@@ -162,30 +201,34 @@ function verificarCadena() {
   return { ok: true, total: n, ultimo_hash: prev };
 }
 
-// ---------- Cálculo de jornadas (pares ENTRADA → SALIDA)
+// ---------- Cálculo de jornadas (ENTRADA → [descansos] → SALIDA)
 function calcularJornadas(desdeIso, hastaIso, empleadoId) {
   // Se amplía el rango 1 día hacia atrás para captar entradas de turnos nocturnos.
   const desdeExt = new Date(new Date(desdeIso).getTime() - 86400000).toISOString();
   const params = [desdeExt, hastaIso];
   let sql = `SELECT r.*, e.numero, e.nombre FROM registros r JOIN empleados e ON e.id=r.empleado_id
-    WHERE r.tipo IN ('ENTRADA','SALIDA') AND r.fecha_hora >= ? AND r.fecha_hora < ?
+    WHERE r.tipo IN ('ENTRADA','SALIDA','INICIO_DESCANSO','FIN_DESCANSO') AND r.fecha_hora >= ? AND r.fecha_hora < ?
     AND r.id NOT IN (SELECT ref_id FROM registros WHERE tipo='ANULACION' AND ref_id IS NOT NULL)`;
   if (empleadoId) { sql += ' AND r.empleado_id=?'; params.push(Number(empleadoId)); }
   sql += ' ORDER BY r.empleado_id, r.fecha_hora, r.id';
   const filas = db.prepare(sql).all(...params);
   const out = [];
-  let abierta = null;
+  const ms = (a, b) => new Date(b.fecha_hora) - new Date(a.fecha_hora);
   const cerrar = (j) => {
-    if (j.entrada && j.entrada.fecha_hora < desdeIso) return;   // pertenece al día previo al rango
-    if (!j.entrada && j.salida.fecha_hora < desdeIso) return;
     const ref = j.entrada || j.salida;
-    const horas = j.entrada && j.salida
-      ? (new Date(j.salida.fecha_hora) - new Date(j.entrada.fecha_hora)) / 3600000 : null;
-    const obs = [];
+    if (ref.fecha_hora < desdeIso) return;   // pertenece al día previo al rango
+    const obs = [...j.obs];
+    if (j.descansoAbierto) {
+      if (j.salida) { j.descansos.push([j.descansoAbierto, j.salida]); obs.push('Descanso sin registro de fin'); }
+      else obs.push('Descanso sin registro de fin');
+    }
+    const total = j.entrada && j.salida ? ms(j.entrada, j.salida) / 3600000 : null;
+    const descanso = j.descansos.reduce((s, [a, b]) => s + ms(a, b), 0) / 3600000;
     if (!j.salida) obs.push('Sin registro de salida');
     if (!j.entrada) obs.push('Salida sin entrada');
-    if ([j.entrada, j.salida].some((x) => x && x.origen === 'CORRECCION')) obs.push('Incluye corrección');
-    if (horas !== null && horas > 16) obs.push('Jornada mayor a 16 h, revisar');
+    if ([j.entrada, j.salida, ...j.descansos.flat()].some((x) => x && x.origen === 'CORRECCION')) obs.push('Incluye corrección');
+    if (total !== null && total > 16) obs.push('Jornada mayor a 16 h, revisar');
+    const r2 = (x) => Math.round(x * 100) / 100;
     out.push({
       empleado_id: ref.empleado_id, numero: ref.numero, nombre: ref.nombre,
       fecha: fechaLocal(ref.fecha_hora),
@@ -193,24 +236,68 @@ function calcularJornadas(desdeIso, hastaIso, empleadoId) {
       salida: j.salida ? horaLocal(j.salida.fecha_hora) : null,
       salida_fecha: j.salida ? fechaLocal(j.salida.fecha_hora) : null,
       entrada_id: j.entrada?.id ?? null, salida_id: j.salida?.id ?? null,
-      horas: horas === null ? null : Math.round(horas * 100) / 100,
-      observaciones: obs.join('; '),
+      descansos: j.descansos.map(([a, b]) => `${horaLocal(a.fecha_hora).slice(0, 5)}–${horaLocal(b.fecha_hora).slice(0, 5)}`).join(', '),
+      horas_presencia: total === null ? null : r2(total),
+      horas_descanso: r2(descanso),
+      horas: total === null ? null : r2(total - descanso),     // horas efectivas trabajadas
+      observaciones: [...new Set(obs)].join('; '),
     });
   };
-  let empActual = null;
+  let abierta = null, empActual = null;
+  const nueva = (entrada) => ({ entrada, salida: null, descansos: [], descansoAbierto: null, obs: [] });
   for (const f of filas) {
     if (f.empleado_id !== empActual) { if (abierta) cerrar(abierta); abierta = null; empActual = f.empleado_id; }
     if (f.tipo === 'ENTRADA') {
       if (abierta) cerrar(abierta);
-      abierta = { entrada: f, salida: null };
-    } else {
+      abierta = nueva(f);
+    } else if (f.tipo === 'SALIDA') {
       if (abierta) { abierta.salida = f; cerrar(abierta); abierta = null; }
-      else cerrar({ entrada: null, salida: f });
+      else { const j = nueva(null); j.salida = f; cerrar(j); }
+    } else if (f.tipo === 'INICIO_DESCANSO') {
+      if (abierta && !abierta.descansoAbierto) abierta.descansoAbierto = f;
+      else if (abierta) abierta.obs.push('Inicio de descanso duplicado');
+    } else if (f.tipo === 'FIN_DESCANSO') {
+      if (abierta?.descansoAbierto) { abierta.descansos.push([abierta.descansoAbierto, f]); abierta.descansoAbierto = null; }
+      else if (abierta) abierta.obs.push('Fin de descanso sin inicio');
     }
   }
   if (abierta) cerrar(abierta);
   return out;
 }
+
+// ---------- Horas extra por semana (lunes a domingo)
+const sumarDias = (fecha, n) => { const d = new Date(fecha + 'T12:00:00Z'); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); };
+const lunesDe = (fecha) => { const d = new Date(fecha + 'T12:00:00Z'); return sumarDias(fecha, -((d.getUTCDay() + 6) % 7)); };
+function calcularSemanas(desde, hasta, empleadoId) {
+  const ini = lunesDe(desde || hoyLocal()), fin = sumarDias(lunesDe(hasta || desde || hoyLocal()), 6);
+  const [d, h] = rangoUtc(ini, fin);
+  const jornadas = calcularJornadas(d, h, empleadoId);
+  const emps = Object.fromEntries(db.prepare('SELECT id, numero, nombre, rfc, curp, puesto, horas_semana FROM empleados').all().map((e) => [e.id, e]));
+  const semanas = {};
+  for (const j of jornadas) {
+    const lunes = lunesDe(j.fecha), clave = `${j.empleado_id}|${lunes}`;
+    const s = semanas[clave] ??= { empleado_id: j.empleado_id, numero: j.numero, nombre: j.nombre, desde: lunes, hasta: sumarDias(lunes, 6),
+      dias: new Set(), horas: 0, descanso: 0, incidencias: 0, jornadas: [] };
+    s.dias.add(j.fecha); s.horas += j.horas || 0; s.descanso += j.horas_descanso || 0; if (j.observaciones) s.incidencias++;
+    s.jornadas.push(j);
+  }
+  return Object.values(semanas).map((s) => {
+    const limite = emps[s.empleado_id]?.horas_semana || jornadaLegal(Number(s.desde.slice(0, 4)));
+    const extra = Math.max(0, s.horas - limite);
+    const r2 = (x) => Math.round(x * 100) / 100;
+    const conf = db.prepare('SELECT * FROM conformidades WHERE empleado_id=? AND desde=? AND hasta=? ORDER BY id DESC LIMIT 1')
+      .get(s.empleado_id, s.desde, s.hasta);
+    const resumenHash = sha256(resumenSemana(s.jornadas));
+    return { ...s, dias: s.dias.size, horas: r2(s.horas), descanso: r2(s.descanso), jornada_semanal: limite,
+      horas_extra: r2(extra), extra_dobles: r2(Math.min(extra, HORAS_EXTRA_DOBLES)), extra_triples: r2(Math.max(0, extra - HORAS_EXTRA_DOBLES)),
+      resumen_hash: resumenHash,
+      conformidad: conf ? { acuerdo: !!conf.acuerdo, comentario: conf.comentario, fecha: `${fechaLocal(conf.fecha)} ${horaLocal(conf.fecha)}`,
+        vigente: conf.resumen_hash === resumenHash, sello: conf.hash.slice(0, 16) } : null };
+  }).sort((a, b) => a.desde.localeCompare(b.desde) || a.nombre.localeCompare(b.nombre));
+}
+// Resumen canónico de una semana: lo que el trabajador confirma con su conformidad.
+const resumenSemana = (jornadas) => JSON.stringify(jornadas.map((j) =>
+  [j.fecha, j.entrada, j.salida_fecha, j.salida, j.descansos, j.horas]));
 
 // ---------- Tokens de kiosco (QR rotativo) y pases de registro
 const ventanaActual = () => Math.floor(Date.now() / 1000 / QR_VENTANA_S);
@@ -296,15 +383,24 @@ class ErrorHttp extends Error { constructor(code, msg) { super(msg); this.code =
 const exigir = (cond, code, msg) => { if (!cond) throw new ErrorHttp(code, msg); };
 
 function ultimoRegistro(empleadoId) {
-  return db.prepare(`SELECT tipo, fecha_hora FROM registros WHERE empleado_id=? AND tipo IN ('ENTRADA','SALIDA')
+  return db.prepare(`SELECT tipo, fecha_hora FROM registros WHERE empleado_id=? AND tipo <> 'ANULACION'
     AND id NOT IN (SELECT ref_id FROM registros WHERE tipo='ANULACION' AND ref_id IS NOT NULL)
     ORDER BY fecha_hora DESC, id DESC LIMIT 1`).get(empleadoId);
 }
-function sugerido(ult) {
-  if (!ult || ult.tipo === 'SALIDA') return 'ENTRADA';
-  return (Date.now() - new Date(ult.fecha_hora)) > 18 * 3600000 ? 'ENTRADA' : 'SALIDA';
+// Acciones posibles según el último registro; la primera es la sugerida.
+function opciones(ult) {
+  if (!ult || ult.tipo === 'SALIDA' || Date.now() - new Date(ult.fecha_hora) > 18 * 3600000) return ['ENTRADA', 'SALIDA'];
+  if (ult.tipo === 'INICIO_DESCANSO') return ['FIN_DESCANSO', 'SALIDA'];
+  return ['SALIDA', 'INICIO_DESCANSO'];   // ENTRADA o FIN_DESCANSO
 }
-const fmtUlt = (u) => u ? { tipo: u.tipo, fecha: fechaLocal(u.fecha_hora), hora: horaLocal(u.fecha_hora) } : null;
+function estado(ult) {
+  if (!ult) return 'SIN REGISTRO HOY';
+  const vigente = Date.now() - new Date(ult.fecha_hora) < 18 * 3600000;
+  if (vigente && ult.tipo === 'INICIO_DESCANSO') return 'EN DESCANSO';
+  if (vigente && ult.tipo !== 'SALIDA') return 'DENTRO';
+  return fechaLocal(ult.fecha_hora) === hoyLocal() ? 'SALIÓ' : 'SIN REGISTRO HOY';
+}
+const fmtUlt = (u) => u ? { tipo: u.tipo, nombre_tipo: NOMBRE_TIPO[u.tipo], fecha: fechaLocal(u.fecha_hora), hora: horaLocal(u.fecha_hora) } : null;
 
 const rutas = {
   // ---------- Kiosco
@@ -330,7 +426,7 @@ const rutas = {
     if (!e) return enviarJson(res, 200, { vinculado: false, empresa: EMPRESA });
     const ult = ultimoRegistro(e.id);
     enviarJson(res, 200, { vinculado: true, empresa: EMPRESA, empleado: { numero: e.numero, nombre: e.nombre, puesto: e.puesto },
-      ultimo: fmtUlt(ult), sugerido: sugerido(ult) });
+      ultimo: fmtUlt(ult), opciones: opciones(ult), nombres: NOMBRE_TIPO });
   },
   'POST /api/vincular': async (req, res) => {
     const { numero, pin } = await leerJson(req);
@@ -365,10 +461,11 @@ const rutas = {
     exigir(e, 401, 'Este celular no está vinculado. Ingresa tu número y NIP.');
     const p = pases.get(b.pase);
     exigir(p && p.expira > Date.now(), 400, 'El tiempo para registrar expiró. Vuelve a escanear el código QR.');
-    exigir(['ENTRADA', 'SALIDA'].includes(b.tipo), 400, 'Tipo de registro inválido');
+    exigir(TIPOS_MARCA.includes(b.tipo), 400, 'Tipo de registro inválido');
     const ult = ultimoRegistro(e.id);
     exigir(!(ult && ult.tipo === b.tipo && Date.now() - new Date(ult.fecha_hora) < DUPLICADO_MIN * 60000), 409,
-      `Ya registraste tu ${b.tipo.toLowerCase()} hace un momento.`);
+      `Ya registraste "${NOMBRE_TIPO[b.tipo].toLowerCase()}" hace un momento.`);
+    exigir(opciones(ult).includes(b.tipo), 409, `No puedes registrar "${NOMBRE_TIPO[b.tipo].toLowerCase()}" ahora. Vuelve a escanear el código.`);
     pases.delete(b.pase);
     const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
     const r = insertarRegistro({
@@ -376,16 +473,37 @@ const rutas = {
       kiosco_id: p.kiosco_id, dispositivo_id: e.dispositivo_id, ip: ip(req), user_agent: req.headers['user-agent'] || '',
       lat: num(b.lat), lon: num(b.lon), precision_m: num(b.precision),
     });
-    enviarJson(res, 200, { ok: true, folio: r.id, tipo: r.tipo, fecha: fechaLocal(r.fecha_hora), hora: horaLocal(r.fecha_hora),
-      sello: r.hash.slice(0, 12), nombre: e.nombre });
+    enviarJson(res, 200, { ok: true, folio: r.id, tipo: r.tipo, nombre_tipo: NOMBRE_TIPO[r.tipo], fecha: fechaLocal(r.fecha_hora),
+      hora: horaLocal(r.fecha_hora), sello: r.hash.slice(0, 12), nombre: e.nombre });
   },
   'GET /api/mis-registros': (req, res) => {
     const e = dispositivoActual(req);
     exigir(e, 401, 'Celular no vinculado');
     const hasta = hoyLocal();
-    const desde = fechaLocal(new Date(Date.now() - 31 * 86400000).toISOString());
-    const [d, h] = rangoUtc(desde, hasta);
-    enviarJson(res, 200, { nombre: e.nombre, jornadas: calcularJornadas(d, h, e.id).reverse() });
+    const desde = sumarDias(hasta, -34);
+    const semanas = calcularSemanas(desde, hasta, e.id).reverse().map(({ jornadas, ...s }) => ({
+      ...s, cerrada: s.hasta < hasta, jornadas: jornadas.slice().reverse() }));
+    enviarJson(res, 200, { nombre: e.nombre, semanas });
+  },
+  // El trabajador confirma (o hace observaciones a) sus registros de una semana ya terminada.
+  'POST /api/conformidad': async (req, res) => {
+    const b = await leerJson(req);
+    const e = dispositivoActual(req);
+    exigir(e, 401, 'Celular no vinculado');
+    exigir(/^\d{4}-\d{2}-\d{2}$/.test(b.desde || '') && lunesDe(b.desde) === b.desde, 400, 'Semana inválida');
+    const hasta = sumarDias(b.desde, 6);
+    exigir(hasta < hoyLocal(), 400, 'Solo puedes confirmar semanas que ya terminaron');
+    exigir(b.acuerdo || String(b.comentario || '').trim().length >= 5, 400, 'Escribe tu observación (mín. 5 caracteres)');
+    const s = calcularSemanas(b.desde, b.desde, e.id)[0];
+    exigir(s, 404, 'No hay registros en esa semana');
+    exigir(!(s.conformidad && s.conformidad.vigente), 409, 'Ya respondiste por esta semana');
+    const resumen = resumenSemana(s.jornadas), fecha = ahora();
+    const hash = sha256([e.id, s.desde, hasta, b.acuerdo ? 1 : 0, b.comentario || '', sha256(resumen), fecha].join('|'));
+    db.prepare(`INSERT INTO conformidades (empleado_id, desde, hasta, acuerdo, comentario, resumen, resumen_hash, dispositivo_id, ip, user_agent, fecha, hash)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`).run(e.id, s.desde, hasta, b.acuerdo ? 1 : 0, b.acuerdo ? null : String(b.comentario).trim(),
+      resumen, sha256(resumen), e.dispositivo_id, ip(req), req.headers['user-agent'] || '', fecha, hash);
+    bitacora(`empleado:${e.numero}`, b.acuerdo ? 'conformidad' : 'observacion', { semana: s.desde });
+    enviarJson(res, 200, { ok: true, sello: hash.slice(0, 16) });
   },
 
   // ---------- Administración
@@ -404,7 +522,8 @@ const rutas = {
 };
 
 const rutasAdmin = {
-  'GET /api/admin/yo': (req, res, q, a) => enviarJson(res, 200, { usuario: a.usuario, nombre: a.nombre, empresa: EMPRESA, tz: TZ, hoy: hoyLocal() }),
+  'GET /api/admin/yo': (req, res, q, a) => enviarJson(res, 200, { usuario: a.usuario, nombre: a.nombre, empresa: EMPRESA, tz: TZ, hoy: hoyLocal(),
+    jornada_legal: jornadaLegal(Number(hoyLocal().slice(0, 4))), horas_extra_dobles: HORAS_EXTRA_DOBLES, nombres: NOMBRE_TIPO }),
   'POST /api/admin/password': async (req, res, q, a) => {
     const { actual, nueva } = await leerJson(req);
     const fila = db.prepare('SELECT pass_hash FROM admins WHERE id=?').get(a.id);
@@ -426,7 +545,7 @@ const rutasAdmin = {
   },
 
   'GET /api/admin/empleados': (req, res) => {
-    enviarJson(res, 200, db.prepare(`SELECT e.id, e.numero, e.nombre, e.rfc, e.curp, e.puesto, e.activo, e.creado_en,
+    enviarJson(res, 200, db.prepare(`SELECT e.id, e.numero, e.nombre, e.rfc, e.curp, e.puesto, e.horas_semana, e.activo, e.creado_en,
       (SELECT COUNT(*) FROM dispositivos d WHERE d.empleado_id=e.id AND d.revocado_en IS NULL) AS celular
       FROM empleados e ORDER BY e.activo DESC, e.nombre`).all());
   },
@@ -435,9 +554,9 @@ const rutasAdmin = {
     exigir(b.numero && b.nombre, 400, 'Número y nombre son obligatorios');
     exigir(/^\d{4,8}$/.test(String(b.pin || '')), 400, 'El NIP debe ser de 4 a 8 dígitos');
     try {
-      db.prepare('INSERT INTO empleados (numero, nombre, rfc, curp, puesto, pin_hash, creado_en) VALUES (?,?,?,?,?,?,?)')
+      db.prepare('INSERT INTO empleados (numero, nombre, rfc, curp, puesto, horas_semana, pin_hash, creado_en) VALUES (?,?,?,?,?,?,?,?)')
         .run(String(b.numero).trim(), String(b.nombre).trim(), (b.rfc || '').toUpperCase().trim() || null,
-          (b.curp || '').toUpperCase().trim() || null, (b.puesto || '').trim() || null, hashPass(b.pin), ahora());
+          (b.curp || '').toUpperCase().trim() || null, (b.puesto || '').trim() || null, Number(b.horas_semana) || null, hashPass(b.pin), ahora());
     } catch { throw new ErrorHttp(409, 'Ya existe un empleado con ese número'); }
     bitacora(`admin:${a.usuario}`, 'alta_empleado', { numero: b.numero, nombre: b.nombre });
     enviarJson(res, 200, { ok: true });
@@ -450,9 +569,9 @@ const rutasAdmin = {
       exigir(/^\d{4,8}$/.test(String(b.pin)), 400, 'El NIP debe ser de 4 a 8 dígitos');
       db.prepare('UPDATE empleados SET pin_hash=? WHERE id=?').run(hashPass(b.pin), e.id);
     }
-    db.prepare('UPDATE empleados SET nombre=?, rfc=?, curp=?, puesto=?, activo=? WHERE id=?').run(
+    db.prepare('UPDATE empleados SET nombre=?, rfc=?, curp=?, puesto=?, horas_semana=?, activo=? WHERE id=?').run(
       (b.nombre ?? e.nombre).trim(), (b.rfc ?? e.rfc ?? '').toUpperCase().trim() || null,
-      (b.curp ?? e.curp ?? '').toUpperCase().trim() || null, (b.puesto ?? e.puesto ?? '').trim() || null,
+      (b.curp ?? e.curp ?? '').toUpperCase().trim() || null, (b.puesto ?? e.puesto ?? '').trim() || null, b.horas_semana === undefined ? e.horas_semana : (Number(b.horas_semana) || null),
       b.activo === undefined ? e.activo : (b.activo ? 1 : 0), e.id);
     if (b.revocar_celular || b.activo === false)
       db.prepare('UPDATE dispositivos SET revocado_en=? WHERE empleado_id=? AND revocado_en IS NULL').run(ahora(), e.id);
@@ -478,11 +597,9 @@ const rutasAdmin = {
 
   'GET /api/admin/presentes': (req, res) => {
     const emps = db.prepare('SELECT id, numero, nombre, puesto FROM empleados WHERE activo=1 ORDER BY nombre').all();
-    const hoy = hoyLocal();
     enviarJson(res, 200, emps.map((e) => {
       const u = ultimoRegistro(e.id);
-      const dentro = u && u.tipo === 'ENTRADA' && Date.now() - new Date(u.fecha_hora) < 18 * 3600000;
-      return { ...e, estado: dentro ? 'DENTRO' : (u && fechaLocal(u.fecha_hora) === hoy ? 'SALIÓ' : 'SIN REGISTRO HOY'), ultimo: fmtUlt(u) };
+      return { ...e, estado: estado(u), ultimo: fmtUlt(u) };
     }));
   },
   'GET /api/admin/registros': (req, res, q) => enviarJson(res, 200, consultarRegistros(q)),
@@ -502,7 +619,7 @@ const rutasAdmin = {
       r = insertarRegistro({ empleado_id: orig.empleado_id, tipo: 'ANULACION', origen: 'CORRECCION', ref_id: orig.id,
         registrado_por: `admin:${a.usuario}`, motivo: b.motivo.trim(), ip: ip(req), user_agent: req.headers['user-agent'] || '' });
     } else {
-      exigir(['ENTRADA', 'SALIDA'].includes(b.tipo), 400, 'Tipo inválido');
+      exigir(TIPOS_MARCA.includes(b.tipo), 400, 'Tipo inválido');
       const e = db.prepare('SELECT * FROM empleados WHERE id=?').get(Number(b.empleado_id));
       exigir(e, 404, 'Empleado no encontrado');
       const f = localAUtc(b.fecha_hora);
@@ -523,8 +640,59 @@ const rutasAdmin = {
     const emp = Object.fromEntries(db.prepare('SELECT id, rfc, curp FROM empleados').all().map((e) => [e.id, e]));
     enviarCsv(res, `jornadas_${q.get('desde')}_${q.get('hasta')}.csv`,
       [['numero', 'No. empleado'], ['nombre', 'Nombre'], ['rfc', 'RFC'], ['curp', 'CURP'], ['fecha', 'Fecha'], ['entrada', 'Hora entrada'],
-        ['salida_fecha', 'Fecha salida'], ['salida', 'Hora salida'], ['horas', 'Horas trabajadas'], ['observaciones', 'Observaciones']],
+        ['salida_fecha', 'Fecha salida'], ['salida', 'Hora salida'], ['descansos', 'Descansos'], ['horas_presencia', 'Horas en centro de trabajo'], ['horas_descanso', 'Horas de descanso'], ['horas', 'Horas efectivas'], ['observaciones', 'Observaciones']],
       filas.map((f) => ({ ...f, rfc: emp[f.empleado_id]?.rfc, curp: emp[f.empleado_id]?.curp })));
+  },
+  'GET /api/admin/semanas': (req, res, q) =>
+    enviarJson(res, 200, calcularSemanas(q.get('desde'), q.get('hasta'), q.get('empleado_id')).map(({ jornadas, ...s }) => s)),
+  'GET /api/admin/export/semanas.csv': (req, res, q) => {
+    const filas = calcularSemanas(q.get('desde'), q.get('hasta'), q.get('empleado_id')).map((s) => ({ ...s,
+      conf: !s.conformidad ? 'Pendiente' : !s.conformidad.vigente ? 'Registros cambiaron después de confirmar'
+        : s.conformidad.acuerdo ? `De acuerdo (${s.conformidad.fecha})` : `Observación: ${s.conformidad.comentario}` }));
+    enviarCsv(res, `horas_extra_${q.get('desde')}_${q.get('hasta')}.csv`,
+      [['numero', 'No. empleado'], ['nombre', 'Nombre'], ['desde', 'Semana del'], ['hasta', 'al'], ['dias', 'Días'],
+        ['horas', 'Horas efectivas'], ['descanso', 'Horas de descanso'], ['jornada_semanal', 'Jornada semanal'], ['horas_extra', 'Horas extra'],
+        ['extra_dobles', 'Extra al doble'], ['extra_triples', 'Extra al triple'], ['incidencias', 'Incidencias'], ['conf', 'Conformidad del trabajador']],
+      filas);
+  },
+  // Reporte imprimible (Imprimir → Guardar como PDF) con espacio para firmas
+  'GET /api/admin/reporte': (req, res, q, a) => {
+    const e = db.prepare('SELECT * FROM empleados WHERE id=?').get(Number(q.get('empleado_id')));
+    exigir(e, 404, 'Selecciona un empleado');
+    const semanas = calcularSemanas(q.get('desde'), q.get('hasta'), e.id);
+    const h = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    const tot = semanas.reduce((t, s) => ({ horas: t.horas + s.horas, extra: t.extra + s.horas_extra, d: t.d + s.extra_dobles, t: t.t + s.extra_triples }),
+      { horas: 0, extra: 0, d: 0, t: 0 });
+    const generado = ahora();
+    const sello = sha256(JSON.stringify([e.id, semanas.map((s) => [s.desde, s.resumen_hash]), generado]));
+    const confTxt = (c) => !c ? 'Pendiente de confirmar por el trabajador' : !c.vigente ? 'Los registros cambiaron después de su confirmación'
+      : c.acuerdo ? `Confirmada de conformidad por el trabajador el ${c.fecha} (sello ${c.sello})` : `Con observación del trabajador (${c.fecha}): “${h(c.comentario)}”`;
+    const html = `<!doctype html><html lang="es"><head><meta charset="utf-8"><title>Registro de jornada · ${h(e.nombre)}</title>
+<style>body{font:12px/1.4 system-ui,sans-serif;color:#111;margin:24px}h1{font-size:18px;margin:0}h2{font-size:13px;margin:18px 0 6px}
+table{width:100%;border-collapse:collapse;margin-top:4px}th,td{border:1px solid #bbb;padding:4px 6px;text-align:left}th{background:#f0f0f0}
+td.n,th.n{text-align:right}.datos td{border:none;padding:2px 8px 2px 0}.conf{font-size:11px;margin:4px 0 0;color:#333}
+.firmas{display:flex;gap:60px;margin-top:60px}.firmas div{flex:1;border-top:1px solid #000;text-align:center;padding-top:4px}
+.pie{margin-top:24px;font-size:10px;color:#555}.noimp{margin-bottom:16px}@media print{.noimp{display:none}body{margin:0}}</style></head><body>
+<div class="noimp"><button onclick="print()">Imprimir / Guardar como PDF</button></div>
+<h1>Registro electrónico de jornada laboral</h1><div>${h(EMPRESA)} · Art. 132, fr. XXXIV, Ley Federal del Trabajo</div>
+<table class="datos" style="width:auto;margin-top:10px"><tr><td><b>Persona trabajadora:</b> ${h(e.nombre)}</td><td><b>No.:</b> ${h(e.numero)}</td></tr>
+<tr><td><b>RFC:</b> ${h(e.rfc || '—')}</td><td><b>CURP:</b> ${h(e.curp || '—')}</td></tr><tr><td><b>Puesto:</b> ${h(e.puesto || '—')}</td>
+<td><b>Periodo:</b> ${h(semanas[0]?.desde || q.get('desde'))} al ${h(semanas.at(-1)?.hasta || q.get('hasta'))}</td></tr></table>
+${semanas.map((s) => `<h2>Semana del ${s.desde} al ${s.hasta}</h2>
+<table><tr><th>Fecha</th><th>Entrada</th><th>Salida</th><th>Descansos</th><th class="n">Horas efectivas</th><th>Observaciones</th></tr>
+${s.jornadas.map((j) => `<tr><td>${j.fecha}</td><td>${j.entrada || '—'}</td><td>${j.salida ? j.salida + (j.salida_fecha !== j.fecha ? ` (${j.salida_fecha})` : '') : '—'}</td>
+<td>${h(j.descansos || '—')}</td><td class="n">${j.horas ?? '—'}</td><td>${h(j.observaciones)}</td></tr>`).join('')}
+<tr><th colspan="4">Total semana · jornada semanal ${s.jornada_semanal} h · extra ${s.horas_extra} h (doble ${s.extra_dobles}, triple ${s.extra_triples})</th><th class="n">${s.horas}</th><th></th></tr></table>
+<p class="conf">${confTxt(s.conformidad)}</p>`).join('') || '<p>Sin registros en el periodo.</p>'}
+<h2>Resumen del periodo</h2><table style="width:auto"><tr><th>Horas efectivas</th><th>Horas extra</th><th>Al doble</th><th>Al triple</th></tr>
+<tr><td class="n">${tot.horas.toFixed(2)}</td><td class="n">${tot.extra.toFixed(2)}</td><td class="n">${tot.d.toFixed(2)}</td><td class="n">${tot.t.toFixed(2)}</td></tr></table>
+<div class="firmas"><div>${h(e.nombre)}<br>Persona trabajadora</div><div>Nombre y firma<br>Representante del patrón</div></div>
+<p class="pie">Generado el ${fechaLocal(generado)} ${horaLocal(generado)} (${h(TZ)}) por ${h(a.usuario)}. Sello del reporte: ${sello}.<br>
+Horas extra calculadas sobre la jornada semanal (${HORAS_EXTRA_DOBLES} h por semana al doble y el excedente al triple, art. 68 LFT). El cálculo es informativo; verifique contra el contrato y la normativa vigente.</p>
+</body></html>`;
+    bitacora(`admin:${a.usuario}`, 'reporte', { empleado: e.numero, desde: q.get('desde'), hasta: q.get('hasta'), sello });
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+    res.end(html);
   },
   'GET /api/admin/export/registros.csv': (req, res, q) => {
     enviarCsv(res, `registros_${q.get('desde')}_${q.get('hasta')}.csv`,

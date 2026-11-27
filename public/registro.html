@@ -10,7 +10,13 @@
   main { max-width: 440px; margin: 0 auto; padding: 1rem; }
   header { padding: .6rem 0 1rem; }
   .grande { width: 100%; padding: 1.1rem; font-size: 1.25rem; border-radius: 12px; }
-  .grande.ENTRADA { background: var(--entrada); } .grande.SALIDA { background: var(--salida); }
+  .grande.ENTRADA, .grande.FIN_DESCANSO { background: var(--entrada); } .grande.SALIDA { background: var(--salida); }
+  .grande.INICIO_DESCANSO { background: #6b5a0f; }
+  .semana { border: 1px solid var(--borde); border-radius: 10px; padding: .8rem; }
+  .semana + .semana { margin-top: .8rem; }
+  .semana .tot { font-weight: 700; }
+  .semana table { font-size: .82rem; margin: .5rem 0; }
+  .semana textarea { margin-top: .4rem; }
   .grande.sugerencia { box-shadow: 0 0 0 4px #0f6b5c33; }
   .grande.otro { background: #fff; color: var(--texto); border: 1px solid var(--borde); font-size: 1rem; padding: .8rem; }
   .comprobante { text-align: center; }
@@ -66,9 +72,9 @@
 
   <!-- Historial -->
   <section id="vHistorial" class="panel pila oculto">
-    <h2>Mis registros (últimos 31 días)</h2>
-    <div class="tabla-wrap"><table><thead><tr><th>Fecha</th><th>Entrada</th><th>Salida</th><th class="num">Horas</th></tr></thead>
-      <tbody id="tHist"></tbody></table></div>
+    <h2>Mis registros por semana</h2>
+    <p class="muted">Revisa cada semana terminada y confirma si estás de acuerdo, o escribe tu observación. Tu respuesta queda registrada con fecha y sello.</p>
+    <div id="semanas"></div>
     <button class="sec" onclick="mostrarInicio()">Volver</button>
   </section>
 
@@ -116,12 +122,12 @@ async function mostrarInicio() {
   if (!yo.vinculado) return ver(pase ? 'vVincular' : 'vSinQr');
   if (!pase) return ver('vSinQr');
   $('nombre').textContent = yo.empleado.nombre;
-  $('ultimo').textContent = yo.ultimo ? `Último registro: ${yo.ultimo.tipo.toLowerCase()} el ${yo.ultimo.fecha} a las ${yo.ultimo.hora}` : 'Aún no tienes registros.';
-  const otro = yo.sugerido === 'ENTRADA' ? 'SALIDA' : 'ENTRADA';
-  $('bSugerido').textContent = 'Registrar ' + yo.sugerido.toLowerCase();
-  $('bSugerido').className = 'grande sugerencia ' + yo.sugerido;
-  $('bSugerido').onclick = () => registrar(yo.sugerido);
-  $('bOtro').textContent = 'No, registrar ' + otro.toLowerCase();
+  $('ultimo').textContent = yo.ultimo ? `Último registro: ${yo.ultimo.nombre_tipo.toLowerCase()} el ${yo.ultimo.fecha} a las ${yo.ultimo.hora}` : 'Aún no tienes registros.';
+  const [sug, otro] = yo.opciones;
+  $('bSugerido').textContent = 'Registrar ' + yo.nombres[sug].toLowerCase();
+  $('bSugerido').className = 'grande sugerencia ' + sug;
+  $('bSugerido').onclick = () => registrar(sug);
+  $('bOtro').textContent = (otro === 'SALIDA' && sug === 'ENTRADA' ? 'No, registrar ' : 'Registrar ') + yo.nombres[otro].toLowerCase();
   $('bOtro').onclick = () => registrar(otro);
   ver('vRegistrar');
 }
@@ -138,8 +144,8 @@ async function registrar(tipo) {
   try {
     const d = await api('/api/registrar', { pase, tipo, lat: ubic?.latitude, lon: ubic?.longitude, precision: ubic?.accuracy });
     pase = null;
-    $('cTipo').textContent = d.tipo === 'ENTRADA' ? 'Entrada registrada' : 'Salida registrada';
-    $('cTipo').style.color = d.tipo === 'ENTRADA' ? 'var(--entrada)' : 'var(--salida)';
+    $('cTipo').textContent = d.nombre_tipo + (['ENTRADA', 'SALIDA'].includes(d.tipo) ? ' registrada' : ' registrado');
+    $('cTipo').style.color = d.tipo === 'SALIDA' ? 'var(--salida)' : d.tipo === 'INICIO_DESCANSO' ? '#6b5a0f' : 'var(--entrada)';
     $('cHora').textContent = d.hora;
     $('cFecha').textContent = d.nombre + ' · ' + new Date(d.fecha + 'T12:00').toLocaleDateString('es-MX', { weekday: 'long', day: 'numeric', month: 'long' });
     $('cFolio').textContent = `Folio ${d.folio} · Sello ${d.sello}`;
@@ -153,16 +159,35 @@ async function verHistorial() {
   msg('');
   try {
     const d = await api('/api/mis-registros');
-    $('tHist').innerHTML = d.jornadas.length ? '' : '<tr><td colspan="4" class="muted">Sin registros</td></tr>';
-    for (const j of d.jornadas) {
-      const tr = document.createElement('tr');
-      [j.fecha, j.entrada || '—', j.salida ? j.salida + (j.salida_fecha !== j.fecha ? ' (+1)' : '') : '—', j.horas ?? '—']
-        .forEach((v, i) => { const td = document.createElement('td'); td.textContent = v; if (i === 3) td.className = 'num'; tr.append(td); });
-      tr.title = j.observaciones;
-      $('tHist').append(tr);
-    }
+    const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    const fmt = (f) => new Date(f + 'T12:00').toLocaleDateString('es-MX', { day: 'numeric', month: 'short' });
+    $('semanas').innerHTML = d.semanas.map((s) => {
+      const c = s.conformidad;
+      let estado;
+      if (c && c.vigente) estado = `<div class="msg ${c.acuerdo ? 'ok' : 'warn'}">${c.acuerdo ? '✓ Confirmaste que estás de acuerdo' : 'Enviaste una observación: ' + esc(c.comentario)} · ${esc(c.fecha)}</div>`;
+      else if (!s.cerrada) estado = '<div class="muted">Semana en curso: podrás confirmarla cuando termine.</div>';
+      else estado = `${c ? '<div class="msg warn">Tus registros cambiaron después de tu respuesta. Revísalos de nuevo.</div>' : ''}
+        <div class="fila" style="margin-top:.5rem"><button onclick="confirmar('${s.desde}', true)">Estoy de acuerdo</button>
+        <button class="sec" onclick="this.parentNode.nextElementSibling.classList.toggle('oculto')">Tengo una observación</button></div>
+        <div class="oculto"><textarea id="obs-${s.desde}" rows="2" placeholder="Ej. El martes salí a las 19:00, no a las 18:00"></textarea>
+        <button class="sec" style="margin-top:.4rem" onclick="confirmar('${s.desde}', false)">Enviar observación</button></div>`;
+      return `<div class="semana"><div class="tot">Semana ${fmt(s.desde)} – ${fmt(s.hasta)}: ${s.horas} h</div>
+        <div class="muted">Jornada semanal ${s.jornada_semanal} h${s.horas_extra ? ` · horas extra ${s.horas_extra} (doble ${s.extra_dobles}, triple ${s.extra_triples})` : ''}</div>
+        <table><thead><tr><th>Día</th><th>Entrada</th><th>Salida</th><th class="num">Horas</th></tr></thead><tbody>
+        ${s.jornadas.map((j) => `<tr title="${esc(j.observaciones)}"><td>${fmt(j.fecha)}</td><td>${j.entrada?.slice(0, 5) || '—'}</td>
+          <td>${j.salida ? j.salida.slice(0, 5) + (j.salida_fecha !== j.fecha ? ' (+1)' : '') : '—'}</td><td class="num">${j.horas ?? '—'}</td></tr>
+          ${j.descansos ? `<tr><td></td><td colspan="3" class="muted">Descanso ${esc(j.descansos)}</td></tr>` : ''}`).join('')}
+        </tbody></table>${estado}</div>`;
+    }).join('') || '<p class="muted">Sin registros en las últimas semanas.</p>';
     ver('vHistorial');
   } catch (e) { msg(e.message); }
+}
+
+async function confirmar(desde, acuerdo) {
+  const comentario = acuerdo ? '' : $('obs-' + desde).value;
+  if (acuerdo && !confirm('¿Confirmas que los registros de esta semana son correctos?')) return;
+  try { await api('/api/conformidad', { desde, acuerdo, comentario }); msg(acuerdo ? 'Gracias, tu confirmación quedó registrada.' : 'Tu observación quedó registrada.', 'ok'); await verHistorial(); }
+  catch (e) { msg(e.message); }
 }
 
 async function desvincular() {

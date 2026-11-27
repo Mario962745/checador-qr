@@ -44,6 +44,7 @@
   <nav class="tabs" role="tablist">
     <button data-tab="hoy" aria-selected="true">Hoy</button>
     <button data-tab="jornadas">Jornadas</button>
+    <button data-tab="extras">Horas extra y conformidad</button>
     <button data-tab="registros">Registros</button>
     <button data-tab="empleados">Empleados</button>
     <button data-tab="kioscos">Kioscos (QR)</button>
@@ -58,6 +59,7 @@
       <div class="kpis">
         <div class="panel kpi"><div class="muted">Dentro ahora</div><div class="v" id="kDentro">–</div></div>
         <div class="panel kpi"><div class="muted">Ya salieron hoy</div><div class="v" id="kSalio">–</div></div>
+        <div class="panel kpi"><div class="muted">En descanso</div><div class="v" id="kDesc">–</div></div>
         <div class="panel kpi"><div class="muted">Sin registro hoy</div><div class="v" id="kSin">–</div></div>
       </div>
       <div class="panel pila">
@@ -81,8 +83,23 @@
       </div>
       <div class="panel pila">
         <h2>Detalle de jornadas</h2>
-        <div class="tabla-wrap"><table><thead><tr><th>Fecha</th><th>No.</th><th>Nombre</th><th>Entrada</th><th>Salida</th><th class="num">Horas</th><th>Observaciones</th></tr></thead><tbody id="tJornadas"></tbody></table></div>
+        <div class="tabla-wrap"><table><thead><tr><th>Fecha</th><th>No.</th><th>Nombre</th><th>Entrada</th><th>Salida</th><th>Descansos</th><th class="num">Horas efectivas</th><th>Observaciones</th></tr></thead><tbody id="tJornadas"></tbody></table></div>
       </div>
+    </section>
+
+    <!-- HORAS EXTRA -->
+    <section data-panel="extras" class="pila oculto">
+      <div class="panel fila">
+        <div><label>Desde</label><input type="date" id="eDesde"></div>
+        <div><label>Hasta</label><input type="date" id="eHasta"></div>
+        <div><label>Empleado</label><select id="eEmp" class="selEmp"></select></div>
+        <button onclick="cargarExtras()">Consultar</button>
+        <button class="sec" onclick="exportar('semanas')">Exportar CSV</button>
+        <button class="sec" onclick="abrirReporte()">Reporte imprimible</button>
+      </div>
+      <p class="muted" id="infoJornada"></p>
+      <div class="panel"><div class="tabla-wrap"><table><thead><tr><th>Semana</th><th>No.</th><th>Nombre</th><th class="num">Días</th><th class="num">Horas efectivas</th>
+        <th class="num">Jornada</th><th class="num">Extra</th><th class="num">Al doble</th><th class="num">Al triple</th><th>Conformidad del trabajador</th></tr></thead><tbody id="tExtras"></tbody></table></div></div>
     </section>
 
     <!-- REGISTROS -->
@@ -109,6 +126,7 @@
           <div><label>Puesto</label><input name="puesto"></div>
           <div><label>RFC</label><input name="rfc" maxlength="13"></div>
           <div><label>CURP</label><input name="curp" maxlength="18"></div>
+          <div><label>Jornada semanal (h)</label><input name="horas_semana" type="number" min="1" max="48" step="0.5" placeholder="Máximo legal"></div>
           <div><label>NIP inicial * (4–8 dígitos)</label><input name="pin" inputmode="numeric" pattern="\d{4,8}" required></div>
           <button>Dar de alta</button>
         </form>
@@ -170,7 +188,7 @@
     <h2 id="dCorrTitulo">Agregar registro faltante</h2>
     <div id="dCorrNuevo" class="pila">
       <div><label>Empleado</label><select name="empleado_id" class="selEmp" required></select></div>
-      <div><label>Tipo</label><select name="tipo"><option>ENTRADA</option><option>SALIDA</option></select></div>
+      <div><label>Tipo</label><select name="tipo"><option value="ENTRADA">Entrada</option><option value="SALIDA">Salida</option><option value="INICIO_DESCANSO">Inicio de descanso</option><option value="FIN_DESCANSO">Fin de descanso</option></select></div>
       <div><label>Fecha y hora (hora local)</label><input type="datetime-local" name="fecha_hora"></div>
     </div>
     <p id="dCorrAnular" class="msg warn oculto"></p>
@@ -187,6 +205,7 @@
     <div><label>Nombre</label><input name="nombre" required></div>
     <div><label>Puesto</label><input name="puesto"></div>
     <div class="fila"><div><label>RFC</label><input name="rfc"></div><div><label>CURP</label><input name="curp"></div></div>
+    <div><label>Jornada semanal pactada (h, vacío = máximo legal)</label><input name="horas_semana" type="number" min="1" max="48" step="0.5"></div>
     <div><label>Nuevo NIP (dejar vacío para no cambiar)</label><input name="pin" inputmode="numeric" pattern="\d{4,8}"></div>
     <label style="display:flex;gap:.5rem;align-items:center"><input type="checkbox" name="revocar_celular" style="width:auto"> Desvincular su celular actual</label>
     <label style="display:flex;gap:.5rem;align-items:center"><input type="checkbox" name="activo" style="width:auto"> Activo (desmarcar para dar de baja)</label>
@@ -197,7 +216,7 @@
 <script>
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-let empleados = [], hoy = '', ultimosRegistros = [];
+let empleados = [], hoy = '', ultimosRegistros = [], nombresTipo = {};
 
 async function api(url, body) {
   const r = await fetch(url, body ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) } : {});
@@ -222,7 +241,9 @@ async function iniciar() {
   let yo; try { yo = await api('/api/admin/yo'); } catch { return mostrarLogin(); }
   $('vLogin').classList.add('oculto'); $('vApp').classList.remove('oculto');
   $('empresa').textContent = yo.empresa; $('quien').textContent = yo.nombre + ' (' + yo.usuario + ')';
-  hoy = yo.hoy;
+  hoy = yo.hoy; nombresTipo = yo.nombres;
+  $('infoJornada').textContent = `Jornada semanal máxima legal este año: ${yo.jornada_legal} h (se puede fijar otra menor por persona en Empleados). Las primeras ${yo.horas_extra_dobles} h extra de cada semana se pagan al doble y el excedente al triple. Cálculo informativo; verifíquelo con su contador o abogado.`;
+  { const l = new Date(hoy + 'T12:00'); l.setDate(l.getDate() - ((l.getDay() + 6) % 7) - 28); $('eDesde').value = l.toISOString().slice(0, 10); $('eHasta').value = hoy; }
   const lunes = new Date(hoy + 'T12:00'); lunes.setDate(lunes.getDate() - ((lunes.getDay() + 6) % 7));
   $('jDesde').value = lunes.toISOString().slice(0, 10); $('jHasta').value = hoy;
   $('rDesde').value = hoy; $('rHasta').value = hoy;
@@ -234,27 +255,39 @@ async function iniciar() {
 document.querySelectorAll('nav.tabs button').forEach((b) => b.onclick = () => {
   document.querySelectorAll('nav.tabs button').forEach((x) => x.setAttribute('aria-selected', x === b));
   document.querySelectorAll('[data-panel]').forEach((p) => p.classList.toggle('oculto', p.dataset.panel !== b.dataset.tab));
-  ({ hoy: cargarHoy, jornadas: cargarJornadas, registros: cargarRegistros, empleados: cargarEmpleados, kioscos: cargarKioscos, integridad: cargarBitacora, cuenta: cargarAdmins })[b.dataset.tab]?.();
+  ({ hoy: cargarHoy, jornadas: cargarJornadas, extras: cargarExtras, registros: cargarRegistros, empleados: cargarEmpleados, kioscos: cargarKioscos, integridad: cargarBitacora, cuenta: cargarAdmins })[b.dataset.tab]?.();
 });
 
 const cargarHoy = conAviso(async () => {
   const d = await api('/api/admin/presentes');
-  const c = { DENTRO: 0, 'SALIÓ': 0, 'SIN REGISTRO HOY': 0 }; d.forEach((x) => c[x.estado]++);
-  $('kDentro').textContent = c.DENTRO; $('kSalio').textContent = c['SALIÓ']; $('kSin').textContent = c['SIN REGISTRO HOY'];
+  const c = { DENTRO: 0, 'EN DESCANSO': 0, 'SALIÓ': 0, 'SIN REGISTRO HOY': 0 }; d.forEach((x) => c[x.estado]++);
+  $('kDentro').textContent = c.DENTRO; $('kSalio').textContent = c['SALIÓ']; $('kSin').textContent = c['SIN REGISTRO HOY']; $('kDesc').textContent = c['EN DESCANSO'];
   $('tHoy').innerHTML = d.map((x) => `<tr><td>${esc(x.numero)}</td><td>${esc(x.nombre)}</td><td>${esc(x.puesto)}</td>
-    <td><span class="chip ${x.estado === 'DENTRO' ? 'DENTRO' : ''}">${esc(x.estado)}</span></td>
-    <td>${x.ultimo ? esc(`${x.ultimo.tipo.toLowerCase()} · ${x.ultimo.fecha} ${x.ultimo.hora}`) : '—'}</td></tr>`).join('') || '<tr><td colspan="5" class="muted">Aún no hay personas dadas de alta.</td></tr>';
+    <td><span class="chip ${x.estado === 'DENTRO' ? 'DENTRO' : x.estado === 'EN DESCANSO' ? 'INICIO_DESCANSO' : ''}">${esc(x.estado)}</span></td>
+    <td>${x.ultimo ? esc(`${x.ultimo.nombre_tipo.toLowerCase()} · ${x.ultimo.fecha} ${x.ultimo.hora}`) : '—'}</td></tr>`).join('') || '<tr><td colspan="5" class="muted">Aún no hay personas dadas de alta.</td></tr>';
 });
 
 const qs = (p) => `desde=${$(p + 'Desde').value}&hasta=${$(p + 'Hasta').value}&empleado_id=${$(p + 'Emp').value}`;
-function exportar(tipo) { location.href = `/api/admin/export/${tipo}.csv?` + qs(tipo === 'jornadas' ? 'j' : 'r'); }
+function exportar(tipo) { location.href = `/api/admin/export/${tipo}.csv?` + qs({ jornadas: 'j', semanas: 'e' }[tipo] || 'r'); }
+function abrirReporte() {
+  if (!$('eEmp').value) return aviso('Selecciona un empleado para generar su reporte.', 'warn');
+  window.open('/api/admin/reporte?' + qs('e'), '_blank');
+}
+const cargarExtras = conAviso(async () => {
+  const d = await api('/api/admin/semanas?' + qs('e'));
+  const conf = (c) => !c ? '<span class="chip">Pendiente</span>' : !c.vigente ? '<span class="chip anulado">Cambió después de confirmar</span>'
+    : c.acuerdo ? `<span class="chip DENTRO">De acuerdo</span> <span class="muted">${esc(c.fecha)}</span>` : `<span class="chip SALIDA">Observación</span> ${esc(c.comentario)}`;
+  $('tExtras').innerHTML = d.map((s) => `<tr><td>${s.desde} al ${s.hasta}</td><td>${esc(s.numero)}</td><td>${esc(s.nombre)}</td><td class="num">${s.dias}</td>
+    <td class="num">${s.horas}</td><td class="num">${s.jornada_semanal}</td><td class="num">${s.horas_extra || ''}</td><td class="num">${s.extra_dobles || ''}</td>
+    <td class="num">${s.extra_triples || ''}</td><td>${conf(s.conformidad)}</td></tr>`).join('') || '<tr><td colspan="10" class="muted">Sin registros en el periodo.</td></tr>';
+});
 
 const cargarJornadas = conAviso(async () => {
   const d = await api('/api/admin/jornadas?' + qs('j'));
   $('tJornadas').innerHTML = d.map((j) => `<tr><td>${j.fecha}</td><td>${esc(j.numero)}</td><td>${esc(j.nombre)}</td>
     <td>${j.entrada || '—'}</td><td>${j.salida ? j.salida + (j.salida_fecha !== j.fecha ? ' <span class="muted">(' + j.salida_fecha + ')</span>' : '') : '—'}</td>
-    <td class="num">${j.horas ?? '—'}</td><td>${j.observaciones ? '<span class="chip">' + esc(j.observaciones) + '</span>' : ''}</td></tr>`).join('')
-    || '<tr><td colspan="7" class="muted">Sin jornadas en el periodo.</td></tr>';
+    <td>${esc(j.descansos || '—')}</td><td class="num">${j.horas ?? '—'}</td><td>${j.observaciones ? '<span class="chip">' + esc(j.observaciones) + '</span>' : ''}</td></tr>`).join('')
+    || '<tr><td colspan="8" class="muted">Sin jornadas en el periodo.</td></tr>';
   const res = {};
   for (const j of d) {
     const r = res[j.empleado_id] ??= { numero: j.numero, nombre: j.nombre, dias: new Set(), horas: 0, inc: 0 };
@@ -269,7 +302,7 @@ const cargarRegistros = conAviso(async () => {
   const d = ultimosRegistros = await api('/api/admin/registros?' + qs('r'));
   $('tRegistros').innerHTML = d.map((r) => `<tr style="${r.anulado_por ? 'opacity:.55;text-decoration:line-through' : ''}">
     <td>${r.id}</td><td>${r.fecha}</td><td>${r.hora}</td><td>${esc(r.nombre)}</td>
-    <td><span class="chip ${r.tipo}">${r.tipo}</span>${r.ref_id ? ' folio ' + r.ref_id : ''}${r.anulado_por ? ' <span class="chip anulado">anulado</span>' : ''}</td>
+    <td><span class="chip ${r.tipo}">${nombresTipo[r.tipo] || r.tipo}</span>${r.ref_id ? ' folio ' + r.ref_id : ''}${r.anulado_por ? ' <span class="chip anulado">anulado</span>' : ''}</td>
     <td>${r.origen === 'QR' ? 'QR' : 'Corrección'}</td><td>${esc(r.registrado_por)}</td>
     <td>${esc(r.motivo || r.kiosco || '')}${r.lat ? ` <a target="_blank" rel="noopener" href="https://maps.google.com/?q=${r.lat},${r.lon}">mapa</a>` : ''}</td>
     <td>${r.tipo !== 'ANULACION' && !r.anulado_por ? `<button class="sec" onclick="abrirAnulacion(${r.id})">Anular</button>` : ''}</td></tr>`).join('')
@@ -302,7 +335,7 @@ $('fCorr').onsubmit = conAviso(async (e) => {
 const cargarEmpleados = conAviso(async () => {
   empleados = await api('/api/admin/empleados');
   document.querySelectorAll('.selEmp').forEach((s) => {
-    const todos = s.id === 'jEmp' || s.id === 'rEmp';
+    const todos = ['jEmp', 'rEmp', 'eEmp'].includes(s.id);
     s.innerHTML = (todos ? '<option value="">Todos</option>' : '') + empleados.filter((e) => e.activo || todos)
       .map((e) => `<option value="${e.id}">${esc(e.numero)} · ${esc(e.nombre)}</option>`).join('');
   });
@@ -318,11 +351,11 @@ $('fEmp').onsubmit = conAviso(async (e) => {
 function editarEmp(id) {
   const e = empleados.find((x) => x.id === id), f = $('fEditEmp'); f.reset();
   f.id.value = e.id; f.nombre.value = e.nombre; f.puesto.value = e.puesto || ''; f.rfc.value = e.rfc || ''; f.curp.value = e.curp || '';
-  f.activo.checked = !!e.activo; $('dEmp').showModal();
+  f.activo.checked = !!e.activo; f.horas_semana.value = e.horas_semana || ''; $('dEmp').showModal();
 }
 $('fEditEmp').onsubmit = conAviso(async (e) => {
   e.preventDefault(); const f = e.target;
-  await api('/api/admin/empleados/editar', { id: Number(f.id.value), nombre: f.nombre.value, puesto: f.puesto.value, rfc: f.rfc.value, curp: f.curp.value,
+  await api('/api/admin/empleados/editar', { id: Number(f.id.value), nombre: f.nombre.value, puesto: f.puesto.value, horas_semana: f.horas_semana.value, rfc: f.rfc.value, curp: f.curp.value,
     pin: f.pin.value, revocar_celular: f.revocar_celular.checked, activo: f.activo.checked });
   $('dEmp').close(); aviso('Cambios guardados.'); cargarEmpleados();
 });
